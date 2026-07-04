@@ -29,7 +29,7 @@ resources:
 
 skills:
   modules:
-    - hey_robot.skills.builtin
+    - hey_robot.skill_os.builtins
   mode: bringup
   enabled:
     - inspect_scene
@@ -139,7 +139,7 @@ robots:
       cup: 1
       block: 1
 
-capability_services: {}
+model_services: {}
 
 policies:
   embodied_skills:

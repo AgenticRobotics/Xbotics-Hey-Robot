@@ -6,10 +6,9 @@ from hey_robot.app import DeploymentRunner
 from hey_robot.channels import ChannelContext, WebChannel
 from hey_robot.config import ChannelSpec, DeploymentConfig
 from hey_robot.events import EventKind, RuntimeEvent
-from hey_robot.media import LocalMediaStore
-from hey_robot.protocol import Envelope, RobotAction, SkillIntent
-from hey_robot.robots import RobotManager, RobotRuntime, RobotSafetyError
-from hey_robot.skills import RobotSkillAction
+from hey_robot.protocol import Envelope, RobotAction, RobotSkillAction, SkillIntent
+from hey_robot.robot_runtime import RobotManager, RobotRuntime, RobotSafetyError
+from hey_robot.robot_runtime.media import LocalMediaStore
 
 
 def test_runtime_event_roundtrip_and_filter() -> None:
@@ -73,7 +72,16 @@ def test_runner_builds_services_when_configured(tmp_path) -> None:
                 "main": {
                     "type": "robot_agent",
                     "robot_id": "mock0",
-                    "settings": {"mode": "direct"},
+                    "settings": {
+                        "providers": {
+                            "planner": {
+                                "type": "openai_compat",
+                                "model": "mock-planner",
+                                "api_key": "test-key",
+                                "api_base": "http://127.0.0.1:9/v1",
+                            }
+                        }
+                    },
                 }
             },
             "channels": {"web": {"type": "web", "enabled": True}},

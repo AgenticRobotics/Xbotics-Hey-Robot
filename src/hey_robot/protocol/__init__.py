@@ -14,6 +14,10 @@ from hey_robot.protocol.messages import (
     SkillResult,
     UserTurn,
 )
+from hey_robot.protocol.skills import (
+    RobotSkillAction,
+    RobotSkillResult,
+)
 from hey_robot.protocol.topics import Topics
 
 __all__ = [
@@ -24,6 +28,8 @@ __all__ = [
     "MediaRef",
     "RobotAction",
     "RobotObservation",
+    "RobotSkillAction",
+    "RobotSkillResult",
     "RobotStatus",
     "SkillEvent",
     "SkillIntent",

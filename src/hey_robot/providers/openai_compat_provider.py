@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
+import logging
 from typing import Any
 
 import numpy as np
@@ -27,6 +29,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - exercised only in lean envs
     json_repair = None
 
+logger = logging.getLogger("hey_robot.providers.openai_compat")
+
 
 class OpenAICompatReasoningProvider(BaseReasoningProvider):
     """OpenAI-compatible model provider with nanobot-style protocol handling.
@@ -48,6 +52,7 @@ class OpenAICompatReasoningProvider(BaseReasoningProvider):
         use_responses_api: bool | None = None,
         provider_name: str | None = None,
         supports_required_tool_choice: bool = True,
+        strict_tools: bool = False,
     ) -> None:
         super().__init__(generation=generation)
         self.model = model
@@ -58,6 +63,7 @@ class OpenAICompatReasoningProvider(BaseReasoningProvider):
         self.use_responses_api = use_responses_api
         self.provider_name = provider_name
         self.supports_required_tool_choice = supports_required_tool_choice
+        self.strict_tools = strict_tools
         self._client: Any | None = None
 
     def _client_or_create(self) -> Any:
@@ -69,13 +75,27 @@ class OpenAICompatReasoningProvider(BaseReasoningProvider):
         api_base = self.api_base
         if not api_key:
             raise ValueError("model provider requires api_key")
+        import httpx
+
+        _httpx_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(60.0, connect=15.0, read=45.0, write=15.0, pool=10.0),
+            trust_env=False,
+            http2=False,
+        )
         if api_base:
             self._client = AsyncOpenAI(
-                api_key=api_key, base_url=api_base, default_headers=self.extra_headers
+                api_key=api_key,
+                base_url=api_base,
+                default_headers=self.extra_headers,
+                http_client=_httpx_client,
+                max_retries=0,
             )
         else:
             self._client = AsyncOpenAI(
-                api_key=api_key, default_headers=self.extra_headers
+                api_key=api_key,
+                default_headers=self.extra_headers,
+                http_client=_httpx_client,
+                max_retries=0,
             )
         return self._client
 
@@ -90,7 +110,6 @@ class OpenAICompatReasoningProvider(BaseReasoningProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> ReasoningResponse:
-        client = self._client_or_create()
         model_name = model or self.model
         max_output = max(
             1, int(self.generation.max_tokens if max_tokens is None else max_tokens)
@@ -107,10 +126,21 @@ class OpenAICompatReasoningProvider(BaseReasoningProvider):
             )
             for message in messages
         ]
-        openai_tools = [_to_openai_tool(tool) for tool in tools or []]
+        openai_tools = [
+            _to_openai_tool(tool, strict=self.strict_tools) for tool in tools or []
+        ]
         effective_tool_choice = self._effective_tool_choice(tool_choice)
+        logger.debug(
+            f"provider request: provider={self.provider_name} model={model_name} "
+            f"api_base={self.api_base} messages={len(openai_messages)} "
+            f"tools={[_tool_function_name(t) for t in openai_tools]} "
+            f"tool_choice={effective_tool_choice or 'auto'} "
+            f"strict_tools={self.strict_tools} "
+            f"responses_api={self._should_use_responses_api(model_name, effort)}"
+        )
         try:
             if self._should_use_responses_api(model_name, effort):
+                client = self._client_or_create()
                 response = await client.responses.create(
                     **self._build_responses_body(
                         openai_messages,
@@ -123,11 +153,12 @@ class OpenAICompatReasoningProvider(BaseReasoningProvider):
                     )
                 )
                 parsed = parse_response_output(response)
-                return _validate_required_tool_call(
+                result = _validate_required_tool_call(
                     parsed, effective_tool_choice, openai_tools
                 )
-            response = await client.chat.completions.create(
-                **self._build_chat_kwargs(
+            else:
+                result = await asyncio.to_thread(
+                    self._sync_chat_call,
                     openai_messages,
                     openai_tools,
                     model_name,
@@ -136,10 +167,53 @@ class OpenAICompatReasoningProvider(BaseReasoningProvider):
                     effort,
                     effective_tool_choice,
                 )
-            )
+            return result
         except Exception as exc:
             return _error_response(exc)
+
+    def _sync_chat_call(
+        self,
+        openai_messages: list[dict[str, Any]],
+        openai_tools: list[dict[str, Any]],
+        model_name: str,
+        max_output: int,
+        temp: float,
+        effort: str | None,
+        effective_tool_choice: str | dict[str, Any] | None,
+    ) -> ReasoningResponse:
+        import httpx as _httpx
+        from openai import OpenAI
+
+        _sync_client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.api_base,
+            timeout=_httpx.Timeout(60.0, connect=15.0, read=45.0),
+            max_retries=0,
+        )
+        kwargs = self._build_chat_kwargs(
+            openai_messages,
+            openai_tools,
+            model_name,
+            max_output,
+            temp,
+            effort,
+            effective_tool_choice,
+        )
+        logger.debug(
+            f"chat completions request body: model={kwargs.get('model')} "
+            f"tools={[_tool_function_name(t) for t in kwargs.get('tools', [])]} "
+            f"tool_choice={kwargs.get('tool_choice')} "
+            f"has_extra_body={'extra_body' in kwargs} "
+            f"has_reasoning_effort={'reasoning_effort' in kwargs}"
+        )
+        response = _sync_client.chat.completions.create(**kwargs)
         parsed = _parse_chat_response(response)
+        logger.debug(
+            f"chat completions parsed response: finish_reason={parsed.finish_reason} "
+            f"error_kind={parsed.error_kind} "
+            f"tool_calls={[c.name for c in parsed.tool_calls]} "
+            f"content_len={len(parsed.content or '')}"
+        )
         return _validate_required_tool_call(parsed, effective_tool_choice, openai_tools)
 
     def get_default_model(self) -> str:
@@ -279,6 +353,13 @@ def _to_openai_tool_call(tool_call: ReasoningToolCall) -> dict[str, Any]:
     }
 
 
+def _tool_function_name(tool: dict[str, Any]) -> str:
+    function = tool.get("function") if isinstance(tool, dict) else None
+    if isinstance(function, dict):
+        return str(function.get("name") or "")
+    return str(tool.get("name") or "") if isinstance(tool, dict) else ""
+
+
 def _image_block(image: ReasoningImage) -> dict[str, Any]:
     return {
         "type": "image_url",
@@ -303,22 +384,92 @@ def _encode_image(image: ReasoningImage) -> str:
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 
-def _to_openai_tool(tool: dict[str, Any]) -> dict[str, Any]:
+def _to_openai_tool(tool: dict[str, Any], *, strict: bool = False) -> dict[str, Any]:
     if tool.get("type") == "function":
-        return tool
+        if not strict:
+            return tool
+        function = dict(tool.get("function") or {})
+        function["parameters"] = _to_strict_tool_schema(
+            function.get("parameters") or {"type": "object", "properties": {}}
+        )
+        function["strict"] = True
+        return {**tool, "function": function}
     input_schema = (
         tool.get("inputSchema")
         or tool.get("input_schema")
         or {"type": "object", "properties": {}}
     )
+    parameters = _to_strict_tool_schema(input_schema) if strict else input_schema
+    function_payload: dict[str, Any] = {
+        "name": str(tool.get("name") or ""),
+        "description": str(tool.get("description") or ""),
+        "parameters": parameters,
+    }
+    if strict:
+        function_payload["strict"] = True
     return {
         "type": "function",
-        "function": {
-            "name": str(tool.get("name") or ""),
-            "description": str(tool.get("description") or ""),
-            "parameters": input_schema,
-        },
+        "function": function_payload,
     }
+
+
+def _to_strict_tool_schema(schema: Any) -> dict[str, Any]:
+    """Return a DeepSeek/OpenAI strict-compatible schema copy.
+
+    DeepSeek strict mode requires object schemas to set all properties as
+    required and additionalProperties=false. We do this only at provider
+    serialization time so local tool validation/defaults stay unchanged.
+    """
+    if not isinstance(schema, dict):
+        return {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        }
+
+    cleaned = {
+        key: _strict_schema_value(value)
+        for key, value in schema.items()
+        if key
+        not in {
+            "nullable",
+            "minLength",
+            "maxLength",
+            "minItems",
+            "maxItems",
+        }
+    }
+
+    schema_type = cleaned.get("type")
+    if isinstance(schema_type, list):
+        non_null = [item for item in schema_type if item != "null"]
+        cleaned["type"] = non_null[0] if non_null else "string"
+
+    if cleaned.get("type") == "object" or "properties" in cleaned:
+        properties = cleaned.get("properties")
+        if not isinstance(properties, dict):
+            properties = {}
+        cleaned["type"] = "object"
+        cleaned["properties"] = {
+            str(name): _to_strict_tool_schema(value)
+            for name, value in properties.items()
+        }
+        cleaned["required"] = list(cleaned["properties"].keys())
+        cleaned["additionalProperties"] = False
+
+    if cleaned.get("type") == "array" and isinstance(cleaned.get("items"), dict):
+        cleaned["items"] = _to_strict_tool_schema(cleaned["items"])
+
+    return cleaned
+
+
+def _strict_schema_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _to_strict_tool_schema(value)
+    if isinstance(value, list):
+        return [_strict_schema_value(item) for item in value]
+    return value
 
 
 def _parse_chat_response(response: Any) -> ReasoningResponse:

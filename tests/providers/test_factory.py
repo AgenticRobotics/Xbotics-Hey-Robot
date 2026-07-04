@@ -12,6 +12,7 @@ from hey_robot.providers import (
 )
 from hey_robot.providers.openai_compat_provider import (
     _to_openai_message,
+    _to_openai_tool,
     _validate_required_tool_call,
 )
 
@@ -45,10 +46,10 @@ def test_build_provider_resolves_model_from_env(monkeypatch) -> None:
 def test_required_tool_choice_rejects_text_only_provider_response() -> None:
     response = _validate_required_tool_call(
         ReasoningResponse(
-            content="```tool_call request_capability({})```", finish_reason="stop"
+            content="```tool_call request_skill({})```", finish_reason="stop"
         ),
         "required",
-        [{"type": "function", "function": {"name": "request_capability"}}],
+        [{"type": "function", "function": {"name": "request_skill"}}],
     )
 
     assert response.finish_reason == "error"
@@ -162,6 +163,74 @@ def test_deepseek_provider_disables_required_tool_choice(monkeypatch) -> None:
     assert provider.supports_required_tool_choice is False
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    ["https://api.deepseek.com", "https://api.deepseek.com/v1"],
+)
+def test_deepseek_strict_tools_uses_beta_base_url(monkeypatch, base_url: str) -> None:
+    monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", base_url)
+    config = DeploymentConfig(
+        agents={
+            "main": AgentSpec(
+                type="robot_agent",
+                settings={
+                    "providers": {
+                        "planner": {
+                            "type": "deepseek",
+                            "model_env": "DEEPSEEK_MODEL",
+                            "api_key_env": "DEEPSEEK_API_KEY",
+                            "base_url_env": "DEEPSEEK_BASE_URL",
+                            "strict_tools": True,
+                        }
+                    }
+                },
+            )
+        }
+    )
+
+    provider = build_provider(config, "main", purpose="planner")
+
+    assert isinstance(provider, OpenAICompatReasoningProvider)
+    assert provider.api_base == "https://api.deepseek.com/beta"
+    assert provider.strict_tools is True
+
+
+def test_strict_tool_schema_matches_deepseek_requirements() -> None:
+    tool = _to_openai_tool(
+        {
+            "name": "request_skill",
+            "description": "Request one robot skill.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "skill": {"type": "string", "minLength": 1},
+                    "slots": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "target": {"type": "string"},
+                        },
+                    },
+                },
+                "required": ["skill"],
+            },
+        },
+        strict=True,
+    )
+
+    function = tool["function"]
+    schema = function["parameters"]
+
+    assert function["strict"] is True
+    assert schema["required"] == ["skill", "slots"]
+    assert schema["additionalProperties"] is False
+    assert "minLength" not in schema["properties"]["skill"]
+    assert schema["properties"]["slots"]["type"] == "object"
+    assert schema["properties"]["slots"]["required"] == ["target"]
+    assert schema["properties"]["slots"]["additionalProperties"] is False
+
+
 def test_assistant_history_preserves_tool_calls() -> None:
     message = ReasoningMessage(
         role="assistant",
@@ -169,9 +238,9 @@ def test_assistant_history_preserves_tool_calls() -> None:
         tool_calls=[
             ReasoningToolCall(
                 id="call_1",
-                name="request_capability",
+                name="request_skill",
                 arguments={
-                    "capability": "camera_inspect",
+                    "skill": "camera_inspect",
                     "objective": "capture front view",
                     "interrupt": False,
                 },
@@ -183,7 +252,7 @@ def test_assistant_history_preserves_tool_calls() -> None:
 
     assert payload["role"] == "assistant"
     assert payload["tool_calls"][0]["id"] == "call_1"
-    assert payload["tool_calls"][0]["function"]["name"] == "request_capability"
+    assert payload["tool_calls"][0]["function"]["name"] == "request_skill"
 
 
 def test_build_provider_deterministic_feedback_purpose() -> None:

@@ -1,250 +1,248 @@
 <div align="center">
-  <img src="docs/images/xbotics-logo.jpg" alt="Xbotics 社区 Logo" width="140" />
+
+  <pre>
+  ██╗  ██╗██████╗  ██████╗ ████████╗██╗ ██████╗███████╗
+  ╚██╗██╔╝██╔══██╗██╔═══██╗╚══██╔══╝██║██╔════╝██╔════╝
+   ╚███╔╝ ██████╔╝██║   ██║   ██║   ██║██║     ███████╗
+   ██╔██╗ ██╔══██╗██║   ██║   ██║   ██║██║     ╚════██║
+  ██╔╝ ██╗██████╔╝╚██████╔╝   ██║   ██║╚██████╗███████║
+  ╚═╝  ╚═╝╚═════╝  ╚═════╝    ╚═╝   ╚═╝ ╚═════╝╚══════╝
+  </pre>
+
+  # Hey Robot
+
+  <p>
+    <em>面向真实机器人的 Embodied Agent Harness · 异步快慢双系统 · 分层解耦的具身智能架构</em>
+  </p>
+
+  <p>
+    <a href="#features">核心能力</a> ·
+    <a href="#architecture">系统架构</a> ·
+    <a href="#quick-start">快速开始</a> ·
+    <a href="#real-robot">真机部署</a> ·
+    <a href="#documentation">项目文档</a> ·
+    <a href="docs/README_EN.md">English</a>
+  </p>
+
+  <p>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-0052cc?style=for-the-badge&labelColor=1a1a2e" alt="MIT License"></a>
+    <a href="https://github.com/Xbotics-Embodied-AI-club/Xbotics-Hey-Robot"><img src="https://img.shields.io/badge/Community-Xbotics-4ecdc4?style=for-the-badge&labelColor=1a1a2e" alt="Xbotics Community"></a>
+    <img src="https://img.shields.io/badge/Python-3.12-ffb703?style=for-the-badge&labelColor=1a1a2e" alt="Python 3.12">
+    <img src="https://img.shields.io/badge/Status-Active_Development-ff6b6b?style=for-the-badge&labelColor=1a1a2e" alt="Active Development">
+  </p>
+
 </div>
 
-# Hey Robot
+---
 
-<div align="center">
-  <sub>简体中文 | <a href="docs/README_EN.md">English</a></sub>
-</div>
+Hey Robot 是一个不依赖通用 LLM Agent 框架、面向真实机器人构建的
+**Embodied Agent Harness**。
 
-Hey Robot 是一个面向真实机器人部署的具身 Agent runtime。它以 XLeRobot 为当前主线机器人形态，将 SO101 机械臂、LeKiwi 移动底盘、相机观察、电池/状态监控和 LLM Agent 运行时组合成一个可调度、可观察、可恢复的机器人系统。
+系统采用异步快慢双系统和分层解耦架构。Agent Loop 驱动模型推理与 Tool 使用；
+机器人能力不直接作为 Tool 暴露，而是通过统一入口请求 Skill，并根据执行反馈持续推进任务。
+Skill 能力将以 VLA、VLN 等具身模型为主要方向，通过 Robot Runtime 作用于仿真或真机。
 
-> 项目状态：当前处于 active development。XLeRobot 仿真和真机链路均已跑通，仍建议任何硬件改动先在仿真中验证。
+当前以 [XLeRobot](https://github.com/Vector-Wangel/XLeRobot) 为主要载体，支持
+MuJoCo 仿真和真实硬件部署。
 
 <p align="center">
-  <img src="docs/images/xlerobot.png" alt="XLeRobot" width="360" />
+  <img src="docs/images/xlerobot.png" alt="XLeRobot" width="420" />
 </p>
 
-## 特性
+> **项目状态**：当前处于 active development。VLA/VLN 属于实验能力，
+> 任何机器人运动都应先在仿真中验证。
 
-- 面向机器人任务的 LLM Agent runtime。
-- Skill 层抽象：Agent 只请求机器人能力，不直接控制硬件。
-- 支持 MuJoCo 仿真和 XLeRobot 真机部署。
-- 支持 Web、CLI、语音、飞书等用户入口。
-- 内置 task cockpit：展示任务状态、timeline、scene evidence 和 recovery。
-- VLA 能力通过独立 capability service 接入，不塞进 robot driver。
-- 支持 execution feedback、resource gate、readiness gate、timeout 和恢复流程。
+<span id="features"></span>
 
-## 架构
+## 核心能力
+
+- **Agent Loop 驱动**：Agent 根据当前任务进行推理，按需调用 Tool，并结合返回结果继续规划和执行。
+- **Tool 与 Skill 分离**：Tool 用于状态、感知和记忆等交互；机器人能力通过统一入口请求 Skill。
+- **感知与执行反馈**：结合相机观察、机器人状态和执行结果持续调整任务。
+- **仿真与真机部署**：支持 MuJoCo 仿真和 XLeRobot 真实硬件。
+- **多种交互方式**：支持 Web、CLI、语音和飞书。
+- **任务追踪与恢复**：提供任务状态、执行记录、失败恢复和 Tasks UI。
+- **具身模型驱动**：Skill 能力以 VLA、VLN 等具身模型为主要发展方向。
+
+<span id="architecture"></span>
+
+## 系统架构
+
+快慢双系统描述不同的决策层级：
+
+- **慢系统**：负责语言理解、任务规划、记忆和失败恢复。
+- **快系统**：负责感知、局部决策、安全检查和机器人执行。
+
+各层通过清晰的能力边界协作：
 
 ```mermaid
 flowchart TD
-    U[用户入口<br/>Web / 语音 / 飞书 / CLI]
-    A[Agent 层<br/>理解任务 / 调用能力]
-    S[Skill 层<br/>合约 / 调度 / 资源门禁]
-    R[Robot 层<br/>仿真 / 真机执行]
-    V[外部能力<br/>VLA / gRPC]
-
-    U -->|用户指令| A
-    A -->|能力请求| S
-    S -->|机器人动作| R
-    S -->|可选| V
-    R -->|状态 / 观察| A
-    A -->|回复| U
+    U[用户交互] --> A[Agent Loop<br/>推理 · Tool]
+    A -->|请求 Skill| S[Skill 层<br/>能力 · 调度 · 安全]
+    S -->|模型调用| F[Foundation Model<br/>VLA · VLN]
+    F -->|决策结果| S
+    S -->|受控执行| R[Robot Runtime<br/>MuJoCo · 真机]
+    R -.执行反馈.-> A
 ```
 
-核心边界：
+这种分层让 Agent、机器人能力、具身模型和具体硬件可以分别演进，同时保持完整的
+任务执行与反馈闭环。
 
-- `Robot` 只表示身体和硬件执行边界。
-- `Skill` 是 Agent 调用机器人能力的统一入口。
-- Agent 通过 `request_capability` 调用机器人 skill，不直接提交 `RobotAction`。
-- `RobotService / RobotRuntime / PerceptionService` 负责 observation 与相机帧发布。
-- VLA 能力通过独立 capability service 接入，当前作为可选扩展能力逐步验证。
+详细设计见 [系统架构](docs/architecture/system-architecture.md)。
+
+<span id="quick-start"></span>
 
 ## 快速开始
 
-### 1. 环境要求
+### 环境要求
 
-- Python 3.12
-- [uv](https://github.com/astral-sh/uv)
-- NATS server
-- MuJoCo，用于 XLeRobot 仿真
-- XLeRobot 真机硬件，用于真实机器人部署
+- Ubuntu / Linux
+- Python `3.12`
+- [uv](https://docs.astral.sh/uv/)
+- NATS server，或 Docker
+- MuJoCo
+- 可用的大模型 API
 
-### 2. 安装依赖
+> 当前推荐 Ubuntu。仓库保留了 Windows 配置，但现有依赖锁仅支持 Linux。
 
-```bash
-uv sync --dev
-```
-
-如果需要仿真：
+### 安装依赖
 
 ```bash
-uv sync --dev --extra sim
-```
+git clone https://github.com/Xbotics-Embodied-AI-club/Xbotics-Hey-Robot.git
+cd Xbotics-Hey-Robot
 
-### 3. 配置环境变量
-
-```bash
+uv sync --group dev --group sim
 cp .env.example .env
 ```
 
-根据使用的 provider 填写 `.env`。常用变量：
+根据所选模型服务填写 `.env`。默认仿真配置使用：
 
 ```text
-DEEPSEEK_API_KEY
 DEEPSEEK_MODEL
-DASHSCOPE_API_KEY
+DEEPSEEK_API_KEY
+DEEPSEEK_BASE_URL
 DASHSCOPE_MODEL
-ARK_API_KEY
+DASHSCOPE_API_KEY
 ```
 
-### 4. 启动 NATS
+> 更完整的环境、模型、语音、飞书、仿真与真机配置，请阅读
+> [在线配置指南（持续更新）](https://my.feishu.cn/docx/LT3odU5yyoMOCNxXmmicvbCznBb)。
+
+### 启动 NATS
 
 ```bash
 nats-server
 ```
 
-也可以只用 Docker 启动 NATS：
+也可以使用 Docker：
 
 ```bash
-docker compose up nats
+docker compose up -d nats
 ```
 
-### 5. 运行 XLeRobot 仿真
+### 运行 MuJoCo 仿真
+
+默认仿真配置同时启用了语音和飞书。首次只使用 Web 时，请先关闭对应通道；
+具体配置见 [XLeRobot 仿真部署](docs/operations/xlerobot-sim.md)。
 
 ```bash
-uv run hey-robot run --config configs/xlerobot.sim.windows.yaml
-```
-
-Ubuntu 仿真配置：
-
-```bash
+uv run hey-robot inspect --config configs/xlerobot.sim.ubuntu.yaml
 uv run hey-robot run --config configs/xlerobot.sim.ubuntu.yaml
 ```
 
-默认 Web 入口：
+启动后访问：
 
-```text
-http://127.0.0.1:8080
-```
+| 页面 | 地址 |
+|---|---|
+| 对话界面 | <http://127.0.0.1:8080/chat> |
+| 任务看板 | <http://127.0.0.1:8080/tasks> |
 
-仿真环境适合验证 Agent、Skill、Web/task cockpit 和机器人执行链路，不需要真实机器人硬件。
+<span id="real-robot"></span>
 
 ## XLeRobot 真机
 
-真机部署前先检查平台和硬件映射：
+真机运行前先检查平台、部署配置和硬件映射：
 
-```powershell
-uv run python scripts\ops\check_platform.py --config configs\xlerobot.real.windows.yaml
-uv run hey-robot inspect --config configs\xlerobot.real.windows.yaml
-uv run python scripts\robots\xlerobot\diagnose.py --config configs\xlerobot.real.windows.yaml
+```bash
+uv run python scripts/ops/check_platform.py \
+  --config configs/xlerobot.real.ubuntu.yaml
+
+uv run hey-robot inspect \
+  --config configs/xlerobot.real.ubuntu.yaml
+
+uv run python scripts/robots/xlerobot/diagnose.py \
+  --config configs/xlerobot.real.ubuntu.yaml
 ```
 
-启动完整 runtime：
+确认串口、舵机、相机和电池状态后启动：
 
-```powershell
-uv run hey-robot run --config configs\xlerobot.real.windows.yaml
+```bash
+uv run hey-robot run --config configs/xlerobot.real.ubuntu.yaml
 ```
 
-当前 XLeRobot real/sim 配置默认启用 11 个非 VLA skill：
+详细步骤见 [XLeRobot 真机部署](docs/operations/xlerobot-real.md)。
 
-```text
-inspect_scene
-look_around
-detect_marker
-move_base
-turn_base
-human_follow
-stop_motion
-reset_posture
-set_arm_pose
-move_arm_joints
-set_gripper
-```
+## VLA / VLN
 
-VLA 能力作为可选扩展能力接入，建议在 capability service 稳定后再开放给 Agent 使用。
+VLA 和 VLN 以独立模型服务接入，用于机器人操作和视觉语言导航。
+相关代码和实验配置已经纳入仓库，但模型权重、GPU 环境和完整执行闭环仍需单独准备与验证。
+
+实验入口见 `configs/xlerobot.sim.vla_vln.yaml`，技术细节见
+[ModelService RPC 协议](docs/architecture/model-service-rpc-proto.md)。
 
 ## 安全提示
 
-这个项目可以向真实机器人硬件下发运动命令。请遵守以下原则：
-
-- 先在仿真环境验证，再接入真实机器人硬件。
+- 先在 MuJoCo 仿真中验证，再接入真实机器人。
 - 真机运行时保持急停或断电手段可用。
-- 不要在人员、宠物、易碎物或不稳定环境附近直接测试 motion skill。
-- 修改硬件、串口、舵机 ID、相机编号后，先运行诊断脚本。
-- VLA / foundation model 能力必须经过单独验证后再暴露给 Agent。
+- 不要在人员、宠物、易碎物或不稳定环境附近直接测试运动能力。
+- 修改串口、舵机 ID、相机编号或机械结构后，重新运行诊断。
+- VLA/VLN 必须单独验证后才能用于真机运动。
 
-## 常用命令
-
-```bash
-# 格式化和自动修复
-poe style
-
-# 配置校验、ruff、mypy
-poe lint
-
-# 测试
-poe test
-```
-
-也可以直接运行：
+## 参与开发
 
 ```bash
-uv run ruff check src tests
-uv run mypy src
-uv run pytest -q --no-cov
+uv run poe style
+uv run poe lint
+uv run poe test
 ```
 
-## 常用配置
-
-- `configs/xlerobot.real.windows.yaml`：XLeRobot Windows 真机
-- `configs/xlerobot.sim.windows.yaml`：XLeRobot Windows 仿真
-- `configs/xlerobot.sim.ubuntu.yaml`：XLeRobot Ubuntu 仿真
-
-## 后续计划
-
-项目接下来主要聚焦两件事：更好的机器人交互体验，以及半开放环境中的长程任务能力。
-
-- Agent：增强 memory、plan 和多轮纠偏能力。
-- Skill：接入 VLA、VLN、WAM 等基础模型能力。
-- Runtime：完善执行反馈、失败恢复和任务状态追踪。
-
-## 目录结构
+主要目录：
 
 ```text
-configs/                    部署配置文件
-docs/                       架构、部署、开发文档
-frontend/views/             Web 前端页面
-frontend/shared/            Web 前端公共样式和脚本
-proto/                      capability protobuf 协议源文件
-src/hey_robot/agents/       Agent runtime、主循环、核心决策、任务状态
-src/hey_robot/skills/       Skill 注册、合约、调度控制器和内置技能
-src/hey_robot/robots/       Robot runtime 和机器人驱动
-src/hey_robot/capability/   VLA/capability service 与 gRPC transport
-src/hey_robot/perception/   观察流水线和场景理解
-src/hey_robot/channels/     CLI / Web / 语音 / 飞书通道
-tests/                      单元测试和集成测试
+src/        核心系统代码
+configs/    仿真与真机配置
+frontend/   Web 交互界面
+docs/       架构、部署和开发文档
+scripts/    诊断、模型下载和维护脚本
+tests/      单元与集成测试
 ```
 
-## 文档
+贡献前请阅读 [贡献指南](docs/development/contributing.md) 和
+[Skill 扩展指南](docs/development/skill-extension.md)。
 
-- [运行时形态](docs/overview/runtime-shape.md)
-- [系统架构](docs/architecture/system-architecture.md)
-- [Agent 与 Skill 边界](docs/architecture/agent-skill-boundaries.md)
-- [Capability RPC 协议](docs/architecture/capability-rpc-proto.md)
-- [部署矩阵](docs/operations/deployment-matrix.md)
-- [XLeRobot 真机部署](docs/operations/xlerobot-real.md)
-- [XLeRobot 仿真部署](docs/operations/xlerobot-sim.md)
-- [运行脚本索引](docs/operations/runtime-scripts.md)
-- [Skill 扩展指南](docs/development/skill-extension.md)
-- [贡献指南](docs/development/contributing.md)
+<span id="documentation"></span>
+
+## 项目文档
+
+| 主题 | 文档 |
+|---|---|
+| 完整配置 | [在线配置指南（持续更新）](https://my.feishu.cn/docx/LT3odU5yyoMOCNxXmmicvbCznBb) |
+| 系统概览 | [部署与运行形态](docs/overview/runtime-shape.md) |
+| 架构设计 | [系统架构](docs/architecture/system-architecture.md) |
+| Agent 与机器人能力 | [Agent 与 Skill 边界](docs/architecture/agent-skill-boundaries.md) |
+| MuJoCo 仿真 | [XLeRobot 仿真部署](docs/operations/xlerobot-sim.md) |
+| 真实机器人 | [XLeRobot 真机部署](docs/operations/xlerobot-real.md) |
+| 开发扩展 | [Skill 扩展指南](docs/development/skill-extension.md) |
 
 ## 活动与参考
 
 本项目来自开源机器人 XLeRobot 动手实战工作坊相关实践。
 
-- 工作坊记录：[开源机器人 XLeRobot 动手实战工作坊](https://mp.weixin.qq.com/s/TahLTjvvP9MoisCOCVkEBA)
-- 架构设计参考：[逐际动力相关架构文章](https://www.limxdynamics.com/zh/news/BK000054)
-- Agent 设计参考：[HKUDS/nanobot](https://github.com/HKUDS/nanobot)
-- XLeRobot 官方仓库：[Vector-Wangel/XLeRobot](https://github.com/Vector-Wangel/XLeRobot)
-- 功能参考：[choco-robot/HomeBot](https://github.com/choco-robot/HomeBot)
-- 更多链接：[项目活动与参考资料](docs/references/project-references.md)
+- [开源机器人 XLeRobot 动手实战工作坊](https://mp.weixin.qq.com/s/TahLTjvvP9MoisCOCVkEBA)
+- [XLeRobot 官方仓库](https://github.com/Vector-Wangel/XLeRobot)
+- [项目活动与参考资料](docs/references/project-references.md)
 
 ## 社区
-
-关注公众号或联系开发者：
 
 <div align="center">
   <table>
@@ -262,22 +260,6 @@ tests/                      单元测试和集成测试
     </tr>
   </table>
 </div>
-
-## 贡献
-
-欢迎提交 issue 和 pull request。新增 skill 或硬件能力前，建议先阅读：
-
-- [贡献指南](docs/development/contributing.md)
-- [Skill 扩展指南](docs/development/skill-extension.md)
-- [Agent 与 Skill 边界](docs/architecture/agent-skill-boundaries.md)
-
-提交前请运行：
-
-```bash
-poe style
-poe lint
-poe test
-```
 
 ## License
 

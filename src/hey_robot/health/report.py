@@ -9,7 +9,7 @@ from typing import Any
 
 from hey_robot.config import DeploymentConfig
 from hey_robot.config.validation import validate_deployment
-from hey_robot.skills.registry import registry_from_config
+from hey_robot.skill_os.registry import registry_from_config
 
 
 @dataclass(frozen=True)
@@ -404,7 +404,9 @@ def _fix_hint(message: str) -> str | None:
     if "primitive" in lower or "does not support" in lower:
         return "Check robot driver primitives and keep only skills supported by this embodiment."
     if "capability" in lower:
-        return "Start or configure the required capability service before enabling the skill."
+        return (
+            "Start or configure the required model service before enabling the skill."
+        )
     if "resource path" in lower:
         return (
             "Fix the runtime/media/episode path permissions or choose writable paths."
@@ -454,7 +456,7 @@ def _repo_root() -> Path:
 
 
 def _task_run_store(root: str | Path):
-    from hey_robot.agents.task_run import TaskRunStore
+    from hey_robot.cognition.task_run import TaskRunStore
 
     return TaskRunStore(root)
 

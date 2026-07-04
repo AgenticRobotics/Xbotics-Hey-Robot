@@ -33,7 +33,7 @@ resources:
 
 skills:
   modules:
-    - hey_robot.skills.builtin
+    - hey_robot.skill_os.builtins
   mode: bringup
   enabled:
     - inspect_scene
@@ -41,6 +41,7 @@ skills:
     - detect_marker
     - move_base
     - turn_base
+    - base_velocity_step
     - human_follow
     - stop_motion
     - reset_posture
@@ -281,7 +282,7 @@ robots:
     safety:
       max_abs_action: null
 
-capability_services: {}
+model_services: {}
 
 policies:
   embodied_skills:

@@ -34,7 +34,7 @@
   <mesh name="drive_motor_mount-v4-3" content_type="model/stl" file="meshes/drive_motor_mount-v4-3.stl" scale="0.001 0.001 0.001" /><mesh name="base_plate_layer1-v5-1" content_type="model/stl" file="meshes/base_plate_layer1-v5-1.stl" scale="0.001 0.001 0.001" /><mesh name="ST3215_Servo_Motor-v1-2" content_type="model/stl" file="meshes/ST3215_Servo_Motor-v1-2.stl" scale="0.001 0.001 0.001" /><mesh name="3_8-Hex-Bore-Plastic-VersaHub-217-5828-v2-2" content_type="model/stl" file="meshes/3_8-Hex-Bore-Plastic-VersaHub-217-5828-v2-2.stl" scale="0.001 0.001 0.001" /><mesh name="4-Omni-Directional-Wheel_Single_Body-v1-2" content_type="model/stl" file="meshes/simplify_4-Omni-Directional-Wheel_Single_Body-v1-2.stl" scale="0.001 0.001 0.001" /><mesh name="drive_motor_mount-v4-2" content_type="model/stl" file="meshes/drive_motor_mount-v4-2.stl" scale="0.001 0.001 0.001" /><mesh name="ST3215_Servo_Motor-v1-1" content_type="model/stl" file="meshes/ST3215_Servo_Motor-v1-1.stl" scale="0.001 0.001 0.001" /><mesh name="3_8-Hex-Bore-Plastic-VersaHub-217-5828-v2-1" content_type="model/stl" file="meshes/3_8-Hex-Bore-Plastic-VersaHub-217-5828-v2-1.stl" scale="0.001 0.001 0.001" /><mesh name="4-Omni-Directional-Wheel_Single_Body-v1-1" content_type="model/stl" file="meshes/simplify_4-Omni-Directional-Wheel_Single_Body-v1-1.stl" scale="0.001 0.001 0.001" /><mesh name="drive_motor_mount-v4-1" content_type="model/stl" file="meshes/drive_motor_mount-v4-1.stl" scale="0.001 0.001 0.001" /><mesh name="ST3215_Servo_Motor-v1" content_type="model/stl" file="meshes/ST3215_Servo_Motor-v1.stl" scale="0.001 0.001 0.001" /><mesh name="3_8-Hex-Bore-Plastic-VersaHub-217-5828-v2" content_type="model/stl" file="meshes/3_8-Hex-Bore-Plastic-VersaHub-217-5828-v2.stl" scale="0.001 0.001 0.001" /><mesh name="4-Omni-Directional-Wheel_Single_Body-v1" content_type="model/stl" file="meshes/simplify_4-Omni-Directional-Wheel_Single_Body-v1.stl" scale="0.001 0.001 0.001" /><mesh name="servo_controller_mount-v1" content_type="model/stl" file="meshes/servo_controller_mount-v1.stl" scale="0.001 0.001 0.001" /><mesh name="lipo_battery_mount-v1" content_type="model/stl" file="meshes/lipo_battery_mount-v1.stl" scale="0.001 0.001 0.001" /><mesh name="Battery---Battery-5.2-Ah-DC5521-Plug-v2" content_type="model/stl" file="meshes/Battery---Battery-5.2-Ah-DC5521-Plug-v2.stl" scale="0.001 0.001 0.001" /><mesh name="94868A713_NO-THREADS_Female-Threaded-Hex-Standoff" content_type="model/stl" file="meshes/94868A713_NO-THREADS_Female-Threaded-Hex-Standoff.stl" scale="0.001 0.001 0.001" /><mesh name="base_plate_layer2-v1" content_type="model/stl" file="meshes/base_plate_layer2-v1.stl" scale="0.001 0.001 0.001" /></asset>
 
   <worldbody>
-    <body name="root">
+    <body name="root" pos="10 3 0">
       <inertial pos="0 0 0" mass="0.001" diaginertia="1e-06 1e-06 1e-06" />
       <body name="root_arm_1_link_1">
         <inertial pos="0 0 0" mass="0.001" diaginertia="1e-06 1e-06 1e-06" />
@@ -243,7 +243,21 @@
                 </body>
               </body>
             </body>
-            <body name="top_base_link" pos="0.15 0 0.73">
+            <body name="wand_dock" pos="0.10 0 0.72">
+              <geom name="dock_base" type="cylinder" size="0.04 0.015"
+                    rgba="0.4 0.4 0.5 1" mass="0.1"/>
+              <geom name="pillar_1" type="cylinder" size="0.005 0.06"
+                    pos="0.015 0.015 0.065" rgba="0.35 0.35 0.45 1" mass="0.01"/>
+              <geom name="pillar_2" type="cylinder" size="0.005 0.06"
+                    pos="-0.015 0.015 0.065" rgba="0.35 0.35 0.45 1" mass="0.01"/>
+              <geom name="pillar_3" type="cylinder" size="0.005 0.06"
+                    pos="0.015 -0.015 0.065" rgba="0.35 0.35 0.45 1" mass="0.01"/>
+              <geom name="pillar_4" type="cylinder" size="0.005 0.06"
+                    pos="-0.015 -0.015 0.065" rgba="0.35 0.35 0.45 1" mass="0.01"/>
+              <site name="dock_insertion" pos="0 0 0.10"
+                    size="0.005" rgba="0 1 0 0.5"/>
+            </body>
+            <body name="top_base_link" pos="0.07 0 0.73">
               <inertial pos="0 0 0" quat="0.707107 0 0 0.707107" mass="4.3542" diaginertia="0.005 0.0045 0.0045" />
               <geom name="top_base_link_visual1" pos="0.016 -0.006 -0.727" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.3 0.3 0.3 1" mesh="topbase1" />
               <geom name="top_base_link_visual2" pos="0.016 -0.006 -0.727" quat="1 0 0 0" type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.02 0.02 0.02 1" mesh="topbase2" />

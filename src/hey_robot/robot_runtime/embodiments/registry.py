@@ -59,7 +59,7 @@ DEFAULT_EMBODIMENT_PROFILES: dict[str, EmbodimentProfile] = {
         camera_layout={
             "default_camera": "front",
             "owner": "simulation",
-            "cameras": ("front", "left_wrist", "right_wrist"),
+            "cameras": ("front", "right_wrist"),
         },
         pose_library=(
             "home",
@@ -109,14 +109,13 @@ DEFAULT_EMBODIMENT_PROFILES: dict[str, EmbodimentProfile] = {
             "wrist_roll": (13, 7),
             "gripper": (14, 8),
         },
-        gripper_range=(0.0, 1.2),
+        gripper_range=(0.0, 1.7),
         readiness_resources=(
             "base",
             "arm",
             "gripper",
             "camera",
             "front_camera",
-            "left_wrist_camera",
             "right_wrist_camera",
         ),
         metadata={"driver_kind": "mujoco"},
@@ -169,24 +168,6 @@ DEFAULT_EMBODIMENT_PROFILES: dict[str, EmbodimentProfile] = {
         gripper_range=(0.0, 100.0),
         readiness_resources=("base", "arm", "gripper", "camera"),
         metadata={"driver_kind": "mock"},
-    ),
-    "so101_real": EmbodimentProfile(
-        name="so101_real",
-        robot_family="so101",
-        environment="real",
-        camera_layout={"default_camera": "front", "owner": "robot_driver"},
-        pose_library=("home",),
-        readiness_resources=("arm", "gripper", "camera"),
-        metadata={"driver_kind": "native"},
-    ),
-    "lekiwi_real": EmbodimentProfile(
-        name="lekiwi_real",
-        robot_family="lekiwi",
-        environment="real",
-        camera_layout={"default_camera": "front", "owner": "robot_driver"},
-        pose_library=(),
-        readiness_resources=("base", "camera"),
-        metadata={"driver_kind": "native"},
     ),
 }
 

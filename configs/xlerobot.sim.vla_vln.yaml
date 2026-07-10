@@ -168,7 +168,7 @@ robots:
     embodiment_profile: xlerobot_sim
     enabled: true
     settings:
-      mjcf_path: assets/robots/xlerobot/scene.xml
+      mjcf_path: assets/scenes/home_scene.xml
       render_width: 640
       render_height: 480
       control_hz: 2.0
@@ -222,8 +222,8 @@ model_services:
       port: 9090
       backend: action_chunk_policy
       backend_mode: action_chunk_policy
-      model_path: "models/so101-act-pick-place_ACT"
-      policy_type: "act"
+      model_path: "models/smolvla-so101-pick-orange"
+      policy_type: "smolvla"
       arm_port: ""
       task: ""
       camera_config: {}

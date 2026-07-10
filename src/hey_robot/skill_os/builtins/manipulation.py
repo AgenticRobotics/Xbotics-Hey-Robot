@@ -8,6 +8,12 @@ from hey_robot.protocol import RobotObservation
 from hey_robot.skill_os.base import BaseSkill, SkillResult
 from hey_robot.skill_os.builtins.common import spec
 from hey_robot.skill_os.builtins.manipulation_adapter import vla_output_to_primitives
+from hey_robot.vla.so101_schema import (
+    SO101_STATE_SCHEMA,
+    state_from_arm_status,
+)
+
+_SO101_STATE_SCHEMA = "so101_single_arm_rad_gripper01"
 
 
 class SetArmPoseSkill(BaseSkill):
@@ -21,6 +27,7 @@ class SetArmPoseSkill(BaseSkill):
             "required": ["pose_name"],
         },
         required_resources=("arm",),
+        supported_robots=("xlerobot", "so101", "so101_mobile"),
         driver_primitives=("set_arm_pose",),
         safety_level="motion",
         timeout_sec=12.0,
@@ -49,6 +56,7 @@ class MoveArmJointsSkill(BaseSkill):
             "required": ["joints"],
         },
         required_resources=("arm",),
+        supported_robots=("xlerobot", "so101", "so101_mobile"),
         driver_primitives=("move_arm_joints",),
         safety_level="motion",
         timeout_sec=10.0,
@@ -76,6 +84,7 @@ class SetGripperSkill(BaseSkill):
             },
         },
         required_resources=("gripper",),
+        supported_robots=("xlerobot", "so101", "so101_mobile"),
         driver_primitives=("set_gripper",),
         safety_level="motion",
         timeout_sec=10.0,
@@ -274,13 +283,20 @@ def _observation_payload(
         if preferred:
             images = preferred
     image_dicts = _encode_images(images, resolve_images)
-    return {
+    raw = dict(observation.raw)
+    payload = {
         "frame_id": observation.frame_id,
         "timestamp": observation.envelope.timestamp,
         "images": image_dicts,
         "proprioception": list(observation.proprioception),
-        "raw": dict(observation.raw),
+        "raw": raw,
     }
+    vla_state = state_from_arm_status(raw)
+    if vla_state is not None:
+        payload["state"] = vla_state
+        payload["state_schema"] = str(raw.get("vla_state_schema") or SO101_STATE_SCHEMA)
+        payload["active_arm"] = str(raw.get("active_arm") or "right")
+    return payload
 
 
 def _encode_images(

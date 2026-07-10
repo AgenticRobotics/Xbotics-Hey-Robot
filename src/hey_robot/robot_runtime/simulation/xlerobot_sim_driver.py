@@ -30,6 +30,8 @@ from hey_robot.robot_runtime.simulation.skill_adapter import XLeRobotSimSkillAda
 
 logger = HeyRobotLogger(name="xlerobot_sim")
 _ROBOT_BODY = "base_link"
+_DEFAULT_HEAD_PAN = 0.0
+_DEFAULT_HEAD_TILT = 0.25
 _DEFAULT_SIM_CAMERA_LAYOUT: dict[str, dict[str, Any]] = {
     "front": {
         "camera_name": "front",
@@ -38,15 +40,6 @@ _DEFAULT_SIM_CAMERA_LAYOUT: dict[str, dict[str, Any]] = {
         "distance": 2.2,
         "azimuth": 180.0,
         "elevation": -10.0,
-        "lookat": [0.0, 0.0, 0.0],
-    },
-    "left_wrist": {
-        "camera_name": "left_wrist",
-        "prefer_native": True,
-        "body": "Left_Arm_Camera",
-        "distance": 0.35,
-        "azimuth": 180.0,
-        "elevation": -15.0,
         "lookat": [0.0, 0.0, 0.0],
     },
     "right_wrist": {
@@ -73,6 +66,76 @@ _ARM_JOINT_NAMES = (
 
 _EGL_CONTEXT: Any = None
 """Singleton EGL GL context for headless rendering."""
+
+
+class _DockSessionAdapter:
+    """Expose an XLeRobotSimDriver through the proven dock-kernel session API."""
+
+    def __init__(self, driver: XLeRobotSimDriver) -> None:
+        self.driver = driver
+        self.model = driver.model
+        self.data = driver.data
+        self._base_qpos: dict[int, float] = {}
+        self._base_dofs: list[int] = []
+        self._right_arm_qpos: dict[int, float] = {}
+        self._right_arm_dofs: list[int] = []
+        self.lock_base()
+
+    @property
+    def connected(self) -> bool:
+        return self.model is not None and self.data is not None
+
+    @property
+    def viewer(self) -> Any:
+        return self.driver._viewer
+
+    def require_connected(self) -> None:
+        if not self.connected:
+            raise RuntimeError("XLeRobot simulation is not connected")
+
+    def id_for(self, object_type: Any, name: str) -> int:
+        import mujoco
+
+        object_id = int(mujoco.mj_name2id(self.model, object_type, name))
+        if object_id < 0:
+            raise ValueError(f"MuJoCo object not found: {name}")
+        return object_id
+
+    def lock_base(self) -> None:
+        """Snapshot the chassis and inactive right arm for left-arm manipulation."""
+        import mujoco
+
+        self._base_qpos.clear()
+        self._base_dofs.clear()
+        for name in (
+            "root_x_axis_joint",
+            "root_y_axis_joint",
+            "root_z_rotation_joint",
+        ):
+            joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            qpos_addr = int(self.model.jnt_qposadr[joint_id])
+            dof_addr = int(self.model.jnt_dofadr[joint_id])
+            self._base_qpos[qpos_addr] = float(self.data.qpos[qpos_addr])
+            self._base_dofs.append(dof_addr)
+
+        self._right_arm_qpos.clear()
+        self._right_arm_dofs.clear()
+        for actuator_idx in self.driver.adapter.arm_actuator_indices("right"):
+            joint_id = int(self.model.actuator_trnid[actuator_idx][0])
+            qpos_addr = int(self.model.jnt_qposadr[joint_id])
+            dof_addr = int(self.model.jnt_dofadr[joint_id])
+            self._right_arm_qpos[qpos_addr] = float(self.data.qpos[qpos_addr])
+            self._right_arm_dofs.append(dof_addr)
+
+    def clamp_base(self) -> None:
+        for qpos_addr, value in self._base_qpos.items():
+            self.data.qpos[qpos_addr] = value
+        for dof_addr in self._base_dofs:
+            self.data.qvel[dof_addr] = 0.0
+        for qpos_addr, value in self._right_arm_qpos.items():
+            self.data.qpos[qpos_addr] = value
+        for dof_addr in self._right_arm_dofs:
+            self.data.qvel[dof_addr] = 0.0
 
 
 def _configure_mujoco_gl_backend() -> str | None:
@@ -110,7 +173,7 @@ def _resolve_mjcf_path(settings: dict[str, Any]) -> Path:
         if p.is_absolute():
             return p
         return Path.cwd() / p
-    return Path.cwd() / "assets" / "robots" / "xlerobot" / "scene.xml"
+    return Path.cwd() / "assets" / "scenes" / "home_scene.xml"
 
 
 class XLeRobotSimDriver:
@@ -167,6 +230,11 @@ class XLeRobotSimDriver:
         self.startup_diagnostics: dict[str, Any] = {}
 
         self._last_rendered_frame: np.ndarray | None = None
+        self._dock_session: _DockSessionAdapter | None = None
+        self._dock_arm: Any = None
+        self._dock_gripper: Any = None
+        self._dock_arm_side = "left"
+        self._dock_manipulation_active = False
 
     # RobotDriver protocol
 
@@ -181,12 +249,15 @@ class XLeRobotSimDriver:
         self.data = await asyncio.to_thread(mujoco.MjData, self.model)
 
         rest = self.adapter.arm_rest_positions()
+        num_ctrl = len(self.data.ctrl)
         for idx, pos in rest.items():
-            self.data.ctrl[idx] = pos
-            self._set_actuator_joint_position(idx, pos)
+            if idx < num_ctrl:
+                self.data.ctrl[idx] = pos
+                self._set_actuator_joint_position(idx, pos)
         self._hold_head_camera()
 
         await asyncio.to_thread(mujoco.mj_forward, self.model, self.data)
+        self._initialize_dock_manipulation()
 
         # Linux headless rendering needs an EGL context before Renderer creation.
         # Windows uses WGL; importing mujoco.egl there fails if EGL.dll is absent.
@@ -375,6 +446,19 @@ class XLeRobotSimDriver:
             self.last_error = result.message
             return self._status_for_action(action, success=False)
 
+        # MuJoCo model/data and the passive viewer are owned by this thread.
+        # Running these primitives in asyncio's worker pool can deadlock the
+        # native viewer/context even when the operation itself is short.
+        dock_result = self._execute_dock_primitive(skill)
+        if dock_result is not None:
+            self.last_skill_result = dock_result
+            self.state = "skill_completed" if dock_result.success else "failed"
+            self.last_error = None if dock_result.success else dock_result.message
+            self._update_arm_status()
+            status = self._status_for_action(action, success=dock_result.success)
+            self.state = "idle" if dock_result.success else "failed"
+            return status
+
         try:
             cmd = self.adapter.decode(skill)
         except ValueError as exc:
@@ -397,19 +481,22 @@ class XLeRobotSimDriver:
                 f"{self._gripper_debug_state()}"
             )
 
+        num_ctrl = len(self.data.ctrl)
         if cmd.arm_targets:
             self._stop_base_motion()
             if cmd.delta_mode:
                 for idx, delta in cmd.arm_targets.items():
-                    self.data.ctrl[idx] = float(self.data.ctrl[idx]) + delta
+                    if idx < num_ctrl:
+                        self.data.ctrl[idx] = float(self.data.ctrl[idx]) + delta
             else:
                 for idx, target in cmd.arm_targets.items():
-                    self.data.ctrl[idx] = target
+                    if idx < num_ctrl:
+                        self.data.ctrl[idx] = target
 
         if cmd.jaw_left is not None:
             self._stop_base_motion()
             gripper_indices = self.adapter.gripper_actuator_indices()
-            if gripper_indices is not None:
+            if gripper_indices is not None and gripper_indices[0] < num_ctrl:
                 self.data.ctrl[gripper_indices[0]] = cmd.jaw_left
                 logger.info(
                     f"{self.robot_id} gripper_debug phase=write_left "
@@ -424,7 +511,7 @@ class XLeRobotSimDriver:
         if cmd.jaw_right is not None:
             self._stop_base_motion()
             gripper_indices = self.adapter.gripper_actuator_indices()
-            if gripper_indices is not None:
+            if gripper_indices is not None and gripper_indices[1] < num_ctrl:
                 self.data.ctrl[gripper_indices[1]] = cmd.jaw_right
                 logger.info(
                     f"{self.robot_id} gripper_debug phase=write_right "
@@ -522,9 +609,11 @@ class XLeRobotSimDriver:
 
         await asyncio.to_thread(mujoco.mj_resetData, self.model, self.data)
         rest = self.adapter.arm_rest_positions()
+        num_ctrl = len(self.data.ctrl)
         for idx, pos in rest.items():
-            self.data.ctrl[idx] = pos
-            self._set_actuator_joint_position(idx, pos)
+            if idx < num_ctrl:
+                self.data.ctrl[idx] = pos
+                self._set_actuator_joint_position(idx, pos)
         self._hold_head_camera()
         self._stop_base_motion()
         await asyncio.to_thread(mujoco.mj_forward, self.model, self.data)
@@ -545,6 +634,9 @@ class XLeRobotSimDriver:
         self.renderer = None
         self._scene_camera = None
         self._scene_cameras = {}
+        self._dock_session = None
+        self._dock_arm = None
+        self._dock_gripper = None
         self.data = None
         self.model = None
         self.state = "closed"
@@ -644,6 +736,444 @@ class XLeRobotSimDriver:
 
     # ---- internal simulation helpers ----
 
+    def _initialize_dock_manipulation(self) -> None:
+        """Bind the dock kernels when the active scene contains a wand."""
+        import mujoco
+
+        if (
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "wand") < 0
+            or mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_EQUALITY, "grip_weld")
+            < 0
+        ):
+            return
+        from hey_robot.robot_runtime.simulation.dock_manipulation.arm import (
+            So101MobileArmKernel,
+        )
+        from hey_robot.robot_runtime.simulation.dock_manipulation.gripper import (
+            WandGripperKernel,
+        )
+
+        self._dock_session = _DockSessionAdapter(self)
+        use_physical_left = (
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "Fixed_Jaw_tip_2")
+            >= 0
+        )
+        if use_physical_left:
+            self._dock_arm_side = "right"
+            self._dock_arm = So101MobileArmKernel(
+                self._dock_session,
+                joint_names=(
+                    "Rotation_2",
+                    "Pitch_2",
+                    "Elbow_2",
+                    "Wrist_Pitch_2",
+                    "Wrist_Roll_2",
+                ),
+                actuator_names=(
+                    "Rotation_R",
+                    "Pitch_R",
+                    "Elbow_R",
+                    "Wrist_Pitch_R",
+                    "Wrist_Roll_R",
+                ),
+                ee_body_name="Fixed_Jaw_tip_2",
+            )
+            jaw_actuator_name = "Jaw_R"
+        else:
+            self._dock_arm_side = "left"
+            self._dock_arm = So101MobileArmKernel(self._dock_session)
+            jaw_actuator_name = "Jaw_L"
+        self._dock_arm.bind()
+        self._dock_gripper = WandGripperKernel(
+            self._dock_session,
+            self._dock_arm,
+            jaw_actuator_name=jaw_actuator_name,
+        )
+        self._dock_gripper.bind()
+
+    def _execute_dock_primitive(
+        self, skill: RobotSkillAction
+    ) -> RobotSkillResult | None:
+        """Execute dock manipulation primitives in home scenes."""
+        if self._dock_session is None:
+            return None
+        name = skill.name
+        if name not in {
+            "arm_get_state",
+            "arm_solve_position_ik",
+            "sim_locate_object",
+            "sim_get_object_state",
+        }:
+            if name == "move_arm_joints":
+                joints = skill.arguments.get("joints")
+                if not isinstance(joints, dict) or not any(
+                    key in joints
+                    for key in ("Rotation", "Pitch", "Elbow", "Wrist_Pitch")
+                ):
+                    return None
+            elif name != "set_gripper":
+                return None
+
+        self._dock_session.lock_base()
+        if name == "arm_get_state":
+            return RobotSkillResult(
+                True,
+                "left arm state read",
+                {"joint_positions": self._dock_arm.get_joint_positions()},
+            )
+        if name == "arm_solve_position_ik":
+            self._dock_manipulation_active = True
+            target_local = self._xyz(skill.arguments.get("target_xyz"))
+            target_world = self._base_to_world(target_local)
+            target_axis_local = None
+            target_axis_world = None
+            if skill.arguments.get("target_axis") is not None:
+                target_axis_local = self._xyz(skill.arguments.get("target_axis"))
+                target_axis_world = self._base_vector_to_world(target_axis_local)
+            seed_value = skill.arguments.get("current_joints")
+            seed = (
+                [float(value) for value in seed_value]
+                if isinstance(seed_value, (list, tuple))
+                and len(seed_value) == self._dock_arm.dof
+                else None
+            )
+            solution = self._dock_arm.ik(
+                target_world,
+                seed,
+                target_axis=target_axis_world,
+            )
+            return RobotSkillResult(
+                True,
+                "left-arm IK solved" if solution is not None else "IK unreachable",
+                {
+                    "operation_success": solution is not None,
+                    "failure_mode": None if solution is not None else "ik_unreachable",
+                    "target_xyz": list(target_local),
+                    "target_axis": (
+                        list(target_axis_local)
+                        if target_axis_local is not None
+                        else None
+                    ),
+                    "joint_positions": solution,
+                },
+            )
+        if name == "move_arm_joints":
+            self._dock_manipulation_active = True
+            joints = dict(skill.arguments.get("joints") or {})
+            positions = [
+                float(joints[joint_name])
+                for joint_name in (
+                    "Rotation",
+                    "Pitch",
+                    "Elbow",
+                    "Wrist_Pitch",
+                    "Wrist_Roll",
+                )
+            ]
+            self._move_dock_left_arm(
+                positions, float(skill.arguments.get("duration", 3.0))
+            )
+            return RobotSkillResult(
+                True,
+                "left arm joints moved",
+                {"joint_positions": self._dock_arm.get_joint_positions()},
+            )
+        if name == "set_gripper":
+            if not self._dock_manipulation_active:
+                return None
+            command = str(skill.arguments.get("action") or "").lower()
+            if command == "open":
+                self._set_dock_left_gripper(opened=True)
+            elif command == "close":
+                self._set_dock_left_gripper(opened=False)
+            else:
+                opening = float(skill.arguments.get("opening_pct", 0.0))
+                self._set_dock_left_gripper(opened=opening >= 50.0)
+            return RobotSkillResult(
+                True,
+                f"left gripper {command or 'set'}",
+                {
+                    "held_object": self._dock_gripper.held_object,
+                    "welds": self._dock_gripper.weld_states(),
+                },
+            )
+        if name == "sim_locate_object":
+            query = str(skill.arguments.get("query") or "").strip().lower()
+            if query not in {"wand", "棒", "玩具棒", "toy"}:
+                return RobotSkillResult(
+                    True,
+                    f"object not found: {query}",
+                    {
+                        "operation_success": False,
+                        "failure_mode": "object_not_found",
+                    },
+                )
+            point = self._wand_grasp_position_base()
+            axis = self._wand_grasp_axis_base()
+            count = max(1, int(skill.arguments.get("sample_count", 1)))
+            return RobotSkillResult(
+                True,
+                "located wand",
+                {
+                    "operation_success": True,
+                    "object_name": "wand",
+                    "samples": [list(point) for _ in range(count)],
+                    "grasp_axis": list(axis),
+                    "source": "mujoco_oracle_base_frame",
+                },
+            )
+        if name == "sim_get_object_state":
+            objects = {
+                "wand": list(self._body_position_base("wand")),
+                "wand_dock": list(self._body_position_base("wand_dock")),
+            }
+            return RobotSkillResult(
+                True,
+                "dock object state read",
+                {
+                    "operation_success": True,
+                    "objects": objects,
+                    "dock_target": list(self._dock_target_base()),
+                    "held_object": self._dock_gripper.held_object,
+                    "welds": self._dock_gripper.weld_states(),
+                },
+            )
+        return None
+
+    def _move_dock_left_arm(self, positions: list[float], duration: float) -> None:
+        """Move the left arm with deterministic kinematic interpolation."""
+        if self._dock_session is None:
+            return
+        import mujoco
+
+        actuator_ids = self.adapter.arm_actuator_indices(self._dock_arm_side)[:5]
+        if len(positions) != len(actuator_ids):
+            raise ValueError("left arm requires five joint positions")
+        starts = [
+            self._joint_position_for_actuator(actuator_id)
+            for actuator_id in actuator_ids
+        ]
+        steps = max(2, int(max(0.0, duration) * 60.0))
+        frame_period = duration / steps if self._viewer is not None else 0.0
+        for step in range(steps):
+            alpha = (step + 1) / steps
+            self._dock_session.clamp_base()
+            for actuator_id, start, target in zip(
+                actuator_ids, starts, positions, strict=True
+            ):
+                value = start + alpha * (float(target) - start)
+                self.data.ctrl[actuator_id] = value
+                joint_id = int(self.model.actuator_trnid[actuator_id][0])
+                qpos_addr = int(self.model.jnt_qposadr[joint_id])
+                dof_addr = int(self.model.jnt_dofadr[joint_id])
+                self.data.qpos[qpos_addr] = value
+                self.data.qvel[dof_addr] = 0.0
+            mujoco.mj_kinematics(self.model, self.data)
+            self._sync_active_dock_welds()
+            self._sync_viewer()
+            if frame_period > 0.0:
+                time.sleep(frame_period)
+        mujoco.mj_kinematics(self.model, self.data)
+        mujoco.mj_comPos(self.model, self.data)
+        self._sync_active_dock_welds()
+
+    def _set_dock_left_gripper(self, *, opened: bool) -> None:
+        """Set the dock gripper kinematically and update the grasp weld."""
+        import mujoco
+
+        from hey_robot.robot_runtime.simulation.dock_manipulation.gripper import (
+            JAW_CLOSED,
+            JAW_OPEN,
+        )
+
+        if opened:
+            self._dock_gripper._release_all()
+        actuator_id = int(self._dock_gripper._actuator_id)
+        joint_id = int(self.model.actuator_trnid[actuator_id][0])
+        qpos_addr = int(self.model.jnt_qposadr[joint_id])
+        dof_addr = int(self.model.jnt_dofadr[joint_id])
+        target = JAW_OPEN if opened else JAW_CLOSED
+        self.data.ctrl[actuator_id] = target
+        self.data.qpos[qpos_addr] = target
+        self.data.qvel[dof_addr] = 0.0
+        mujoco.mj_kinematics(self.model, self.data)
+        mujoco.mj_comPos(self.model, self.data)
+        self._dock_gripper._is_open = opened
+        if opened:
+            self._dock_gripper._held_object = None
+            self._dock_manipulation_active = False
+            self._sync_active_dock_welds()
+        else:
+            self._activate_dock_grip_weld()
+
+    def _activate_dock_grip_weld(self) -> None:
+        """Attach the wand to the active dock gripper when within reach."""
+        import mujoco
+
+        grasp_site_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_SITE, "wand_grasp"
+        )
+        ee_position = self._dock_arm.ee_position()
+        grasp_position = np.asarray(self.data.site_xpos[grasp_site_id], dtype=float)
+        if float(np.linalg.norm(ee_position - grasp_position)) >= 0.06:
+            self._dock_gripper._held_object = None
+            return
+
+        grip_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_EQUALITY, "grip_weld"
+        )
+        dock_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_EQUALITY, "dock_weld"
+        )
+        self.data.eq_active[grip_id] = 1
+        if dock_id >= 0:
+            self.data.eq_active[dock_id] = 0
+
+        body1_id = int(self.model.eq_obj1id[grip_id])
+        body2_id = int(self.model.eq_obj2id[grip_id])
+        position1 = self.data.xpos[body1_id]
+        rotation1 = self.data.xmat[body1_id].reshape(3, 3)
+        position2 = self.data.xpos[body2_id]
+        rotation2 = self.data.xmat[body2_id].reshape(3, 3)
+        relative_position = rotation1.T @ (position2 - position1)
+        relative_rotation = rotation1.T @ rotation2
+        relative_quaternion = np.zeros(4, dtype=float)
+        mujoco.mju_mat2Quat(relative_quaternion, relative_rotation.reshape(-1))
+        self.model.eq_data[grip_id, :3] = 0.0
+        self.model.eq_data[grip_id, 3:6] = relative_position
+        self.model.eq_data[grip_id, 6:10] = relative_quaternion
+        self._dock_gripper._held_object = "wand"
+        self._sync_active_dock_welds()
+
+    def _sync_active_dock_welds(self) -> None:
+        """Apply active weld poses for free dock objects during kinematic motion."""
+        import mujoco
+
+        for equality_name in ("dock_weld", "grip_weld"):
+            equality_id = mujoco.mj_name2id(
+                self.model, mujoco.mjtObj.mjOBJ_EQUALITY, equality_name
+            )
+            if equality_id < 0 or not bool(self.data.eq_active[equality_id]):
+                continue
+            body1_id = int(self.model.eq_obj1id[equality_id])
+            body2_id = int(self.model.eq_obj2id[equality_id])
+            joint_start = int(self.model.body_jntadr[body2_id])
+            if joint_start < 0:
+                continue
+            joint_id = joint_start
+            if self.model.jnt_type[joint_id] != mujoco.mjtJoint.mjJNT_FREE:
+                continue
+            qpos_addr = int(self.model.jnt_qposadr[joint_id])
+            dof_addr = int(self.model.jnt_dofadr[joint_id])
+            relative_position = np.asarray(
+                self.model.eq_data[equality_id, 3:6], dtype=float
+            )
+            relative_quaternion = np.asarray(
+                self.model.eq_data[equality_id, 6:10], dtype=float
+            )
+            if float(np.linalg.norm(relative_quaternion)) <= 0.0:
+                relative_quaternion = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+            rotation1 = self.data.xmat[body1_id].reshape(3, 3)
+            position = self.data.xpos[body1_id] + rotation1 @ relative_position
+            quaternion = np.zeros(4, dtype=float)
+            mujoco.mju_mulQuat(
+                quaternion,
+                np.asarray(self.data.xquat[body1_id], dtype=float),
+                relative_quaternion,
+            )
+            self.data.qpos[qpos_addr : qpos_addr + 3] = position
+            self.data.qpos[qpos_addr + 3 : qpos_addr + 7] = quaternion
+            self.data.qvel[dof_addr : dof_addr + 6] = 0.0
+            mujoco.mj_kinematics(self.model, self.data)
+            mujoco.mj_comPos(self.model, self.data)
+
+    @staticmethod
+    def _xyz(value: Any) -> tuple[float, float, float]:
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            raise ValueError("target_xyz must contain three numbers")
+        return (float(value[0]), float(value[1]), float(value[2]))
+
+    def _base_to_world(
+        self, point: tuple[float, float, float]
+    ) -> tuple[float, float, float]:
+        import mujoco
+
+        root_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "root")
+        root = self.data.xpos[root_id]
+        yaw = float(self.data.qpos[2])
+        cosine, sine = math.cos(yaw), math.sin(yaw)
+        return (
+            float(root[0] + cosine * point[0] - sine * point[1]),
+            float(root[1] + sine * point[0] + cosine * point[1]),
+            float(root[2] + point[2]),
+        )
+
+    def _base_vector_to_world(
+        self, vector: tuple[float, float, float]
+    ) -> tuple[float, float, float]:
+        yaw = float(self.data.qpos[2])
+        cosine, sine = math.cos(yaw), math.sin(yaw)
+        return (
+            float(cosine * vector[0] - sine * vector[1]),
+            float(sine * vector[0] + cosine * vector[1]),
+            float(vector[2]),
+        )
+
+    def _world_to_base(self, point: np.ndarray) -> tuple[float, float, float]:
+        import mujoco
+
+        root_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "root")
+        delta = np.asarray(point, dtype=float) - self.data.xpos[root_id]
+        yaw = float(self.data.qpos[2])
+        cosine, sine = math.cos(yaw), math.sin(yaw)
+        return (
+            float(cosine * delta[0] + sine * delta[1]),
+            float(-sine * delta[0] + cosine * delta[1]),
+            float(delta[2]),
+        )
+
+    def _world_vector_to_base(self, vector: np.ndarray) -> tuple[float, float, float]:
+        yaw = float(self.data.qpos[2])
+        cosine, sine = math.cos(yaw), math.sin(yaw)
+        return (
+            float(cosine * vector[0] + sine * vector[1]),
+            float(-sine * vector[0] + cosine * vector[1]),
+            float(vector[2]),
+        )
+
+    def _body_position_base(self, name: str) -> tuple[float, float, float]:
+        import mujoco
+
+        body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+        return self._world_to_base(self.data.xpos[body_id])
+
+    def _wand_grasp_position_base(self) -> tuple[float, float, float]:
+        import mujoco
+
+        site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "wand_grasp")
+        return self._world_to_base(self.data.site_xpos[site_id])
+
+    def _wand_grasp_axis_base(self) -> tuple[float, float, float]:
+        import mujoco
+
+        site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "wand_grasp")
+        ball_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "wand_ball")
+        axis_world = np.asarray(self.data.geom_xpos[ball_id], dtype=float) - np.asarray(
+            self.data.site_xpos[site_id], dtype=float
+        )
+        norm = float(np.linalg.norm(axis_world))
+        if norm <= 0.0:
+            return (1.0, 0.0, 0.0)
+        return self._world_vector_to_base(axis_world / norm)
+
+    def _dock_target_base(self) -> tuple[float, float, float]:
+        """Return the gripper target that restores the wand's docked pose."""
+        import mujoco
+
+        dock_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "wand_dock")
+        dock = self._world_to_base(self.data.xpos[dock_id])
+        return (dock[0], dock[1], dock[2] + 0.255)
+
     def _render_frame(self) -> np.ndarray | None:
         if self.renderer is None or self._scene_camera is None:
             return None
@@ -671,8 +1201,14 @@ class XLeRobotSimDriver:
         phi = float(self.data.qpos[2])
         qvel_x = math.cos(phi) * vy - math.sin(phi) * vx
         qvel_y = math.sin(phi) * vy + math.cos(phi) * vx
+        arm_locks = self._arm_joint_locks()
+        arm_ctrl = {
+            actuator_idx: float(self.data.ctrl[actuator_idx])
+            for actuator_idx, _, _, _ in arm_locks
+        }
 
         for _ in range(steps):
+            self._restore_arm_locks(arm_locks, arm_ctrl)
             mujoco.mj_step1(self.model, self.data)
             self.data.qvel[0] = qvel_x
             self.data.qvel[1] = qvel_y
@@ -681,17 +1217,64 @@ class XLeRobotSimDriver:
             self.data.qacc[1] = 0.0
             self.data.qacc[2] = 0.0
             mujoco.mj_step2(self.model, self.data)
+            # Base motion is kinematic in this simulator. Keep both arms
+            # kinematic as well so chassis teleportation cannot inject
+            # impulses into their dynamic joints.
+            self._restore_arm_locks(arm_locks, arm_ctrl)
+            mujoco.mj_kinematics(self.model, self.data)
             self._sync_viewer()
         self._stop_base_motion()
+
+    def _arm_joint_locks(self) -> list[tuple[int, int, int, float]]:
+        """Snapshot actuator, qpos and dof addresses for both arms."""
+        locks: list[tuple[int, int, int, float]] = []
+        actuator_indices: set[int] = set()
+        for arm in ("left", "right"):
+            actuator_indices.update(self.adapter.arm_actuator_indices(arm))
+        num_actuator = int(self.model.nu)
+        for actuator_idx in sorted(actuator_indices):
+            if actuator_idx >= num_actuator:
+                continue
+            joint_id = int(self.model.actuator_trnid[actuator_idx][0])
+            if joint_id < 0 or joint_id >= self.model.njnt:
+                continue
+            qpos_addr = int(self.model.jnt_qposadr[joint_id])
+            dof_addr = int(self.model.jnt_dofadr[joint_id])
+            locks.append(
+                (
+                    actuator_idx,
+                    qpos_addr,
+                    dof_addr,
+                    float(self.data.qpos[qpos_addr]),
+                )
+            )
+        return locks
+
+    def _restore_arm_locks(
+        self,
+        locks: list[tuple[int, int, int, float]],
+        controls: dict[int, float],
+    ) -> None:
+        """Restore arm targets and eliminate base-induced joint motion."""
+        for actuator_idx, qpos_addr, dof_addr, position in locks:
+            self.data.ctrl[actuator_idx] = controls[actuator_idx]
+            self.data.qpos[qpos_addr] = position
+            self.data.qvel[dof_addr] = 0.0
+            self.data.qacc[dof_addr] = 0.0
 
     def _stop_base_motion(self) -> None:
         if self.data is None:
             return
+        import mujoco
+
         # Zero both actuator targets and simulated base state so later arm/gripper
         # settle steps do not integrate residual chassis motion.
-        self.data.ctrl[15] = 0.0
-        self.data.ctrl[16] = 0.0
-        self.data.ctrl[17] = 0.0
+        for lock_name in ("base_x_lock", "base_y_lock", "base_yaw_lock"):
+            lock_id = mujoco.mj_name2id(
+                self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, lock_name
+            )
+            if lock_id >= 0:
+                self.data.ctrl[lock_id] = 0.0
         self.data.qvel[0] = 0.0
         self.data.qvel[1] = 0.0
         self.data.qvel[2] = 0.0
@@ -704,12 +1287,24 @@ class XLeRobotSimDriver:
 
         if self.model is None or self.data is None:
             return
-        for actuator_name in ("head_pan_hold", "head_tilt_hold"):
+        targets = {
+            "head_pan_hold": ("head_pan_joint", _DEFAULT_HEAD_PAN),
+            "head_tilt_hold": ("head_tilt_joint", _DEFAULT_HEAD_TILT),
+        }
+        for actuator_name, (joint_name, target) in targets.items():
             actuator_id = mujoco.mj_name2id(
                 self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name
             )
             if actuator_id >= 0:
-                self.data.ctrl[actuator_id] = 0.0
+                self.data.ctrl[actuator_id] = target
+            joint_id = mujoco.mj_name2id(
+                self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_name
+            )
+            if joint_id >= 0:
+                qpos_addr = int(self.model.jnt_qposadr[joint_id])
+                dof_addr = int(self.model.jnt_dofadr[joint_id])
+                self.data.qpos[qpos_addr] = target
+                self.data.qvel[dof_addr] = 0.0
 
     def _sync_viewer(self) -> None:
         if self._viewer is not None and self._viewer.is_running():
@@ -824,21 +1419,22 @@ class XLeRobotSimDriver:
             self.last_arm_status = {}
             return
         joint_states: dict[str, float] = {}
+        num_ctrl = len(self.data.ctrl)
         for name in _ARM_JOINT_NAMES:
             indices = self.adapter.joint_to_actuators(name)
             if indices is None:
                 continue
-            left_idx = indices[0]
-            if left_idx < len(self.data.ctrl):
-                joint_states[name] = float(self.data.ctrl[left_idx])
-            else:
-                joint_states[name] = 0.0
+            # Pick the first actuator index that is within bounds.
+            valid = next((idx for idx in indices if idx < num_ctrl), None)
+            joint_states[name] = (
+                float(self.data.ctrl[valid]) if valid is not None else 0.0
+            )
         gripper_indices = self.adapter.gripper_actuator_indices()
-        jaw_l = (
-            self._joint_position_for_actuator(gripper_indices[0])
-            if gripper_indices is not None and gripper_indices[0] < len(self.data.ctrl)
-            else 0.0
-        )
+        jaw_l = 0.0
+        if gripper_indices is not None:
+            valid_grip = next((idx for idx in gripper_indices if idx < num_ctrl), None)
+            if valid_grip is not None:
+                jaw_l = self._joint_position_for_actuator(valid_grip)
         gripper_open_value = self.adapter.gripper_open_value
         gripper_pct = (
             jaw_l / gripper_open_value * 100.0 if gripper_open_value > 0 else 0.0
@@ -1074,9 +1670,12 @@ class XLeRobotSimDriver:
                 camera.fixedcamid = camera_id
                 return camera
         camera.type = mujoco.mjtCamera.mjCAMERA_TRACKING
-        camera.trackbodyid = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_BODY, body_name
-        )
+        track_body = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+        if track_body < 0:
+            track_body = mujoco.mj_name2id(
+                self.model, mujoco.mjtObj.mjOBJ_BODY, _ROBOT_BODY
+            )
+        camera.trackbodyid = track_body
         camera.distance = float(layout.get("distance", 0.8))
         camera.azimuth = float(layout.get("azimuth", 180.0))
         camera.elevation = float(layout.get("elevation", -20.0))

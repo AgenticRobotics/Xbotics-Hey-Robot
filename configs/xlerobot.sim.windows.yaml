@@ -46,6 +46,8 @@ skills:
     - set_arm_pose
     - move_arm_joints
     - set_gripper
+    - pick_wand_from_dock
+    - place_wand_to_dock
 
 notifications:
   defaults:
@@ -169,8 +171,8 @@ robots:
     embodiment_profile: xlerobot_sim
     enabled: true
     settings:
-      # Official XLeRobot MuJoCo scene with native fixed cameras.
-      mjcf_path: assets/robots/xlerobot/scene.xml
+      # XLeRobot home scene with the cart-mounted wand.
+      mjcf_path: assets/scenes/home_scene.xml
       render_width: 640
       render_height: 480
       control_hz: 2.0

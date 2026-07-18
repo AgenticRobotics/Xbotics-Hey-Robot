@@ -110,6 +110,9 @@ class VoiceActivationConfig:
     strip_wake_word: bool = True
     session_timeout_sec: float = 60.0
     min_route_chars: int = 2
+    # 如果 provider 暴露置信度分数，可用它把不确定语音挡在物理目标路由之外。
+    # 缺失的分数不会被伪造。
+    min_command_confidence: float = 0.0
 
 
 @dataclass(frozen=True)

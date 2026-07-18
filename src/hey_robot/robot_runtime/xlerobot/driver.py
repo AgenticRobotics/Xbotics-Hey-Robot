@@ -43,7 +43,7 @@ class XLeRobotClientProtocol(Protocol):
 
 
 class XLeRobotDriver:
-    """XLeRobot embodiment driver for the hey-robot runtime."""
+    """Hey Robot 运行时使用的 XLeRobot 具身驱动。"""
 
     def __init__(self, context: RobotDriverContext) -> None:
         self.context = context
@@ -286,7 +286,7 @@ class XLeRobotDriver:
         return RobotStatus(
             envelope=self._envelope(),
             frame_id=self.frame_id,
-            state=self.state,
+            state=self.state,  # type: ignore[arg-type]
             success=None,
             error=self.last_error,
             metrics={

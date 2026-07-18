@@ -35,6 +35,10 @@ junit.xml
 coverage.xml
 cov.xml
 report.xml
+artifacts/*
+!artifacts/test/
+artifacts/test/*
+!artifacts/test/.gitkeep
 
 # Build and docs folder/files
 build/*
@@ -79,6 +83,6 @@ outputs/*
 runtime/*
 models/*
 
-# board-local launch helper / env (hold secrets) — never commit
+# board-local launch helper / env (hold secrets) - never commit
 run_s600_chat.sh
 .s600_llm_env

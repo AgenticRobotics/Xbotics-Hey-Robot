@@ -23,7 +23,7 @@ SkillContextFactory = Callable[[SkillInvoke], SkillContext]
 
 
 class SkillRuntime:
-    """The single execution boundary for top-level and nested skills."""
+    """顶层技能和嵌套技能共用的唯一执行边界。"""
 
     def __init__(self, registry: SkillRegistry) -> None:
         self.registry = registry
@@ -59,7 +59,10 @@ class SkillRuntime:
         status: RobotStatus | None = None,
         robot_type: str | None = None,
     ) -> SkillResult:
-        resolved_arguments = dict(arguments or {})
+        registered = self.registry.get(name, enabled_only=enabled_only)
+        resolved_arguments = _apply_schema_defaults(
+            registered.spec.input_schema, arguments or {}
+        )
         _, decision = self.validate(
             name,
             resolved_arguments,
@@ -91,7 +94,6 @@ class SkillRuntime:
             )
 
         try:
-            registered = self.registry.get(name, enabled_only=enabled_only)
             assert registered.skill is not None
             return await registered.skill.execute(
                 context_factory(invoke),
@@ -105,6 +107,19 @@ class SkillRuntime:
                 failure_mode="internal_error",
                 error=str(exc),
             )
+
+
+def _apply_schema_defaults(
+    schema: dict[str, Any], arguments: dict[str, Any]
+) -> dict[str, Any]:
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        return dict(arguments)
+    resolved = dict(arguments)
+    for name, field in properties.items():
+        if name not in resolved and isinstance(field, dict) and "default" in field:
+            resolved[name] = field["default"]
+    return resolved
 
 
 __all__ = [

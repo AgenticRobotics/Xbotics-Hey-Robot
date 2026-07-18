@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Protocol
 
+from hey_robot.logging import HeyRobotLogger
 from hey_robot.protocol import (
     RobotAction,
     RobotObservation,
     RobotSkillAction,
     RobotStatus,
+    SceneEntity,
     SkillIntent,
 )
 from hey_robot.robot_runtime.base import RobotCapabilities, RobotDriver, RobotHealth
@@ -20,6 +22,16 @@ from hey_robot.robot_runtime.observations import (
 )
 from hey_robot.robot_runtime.safety import RobotSafetyError, RobotSafetySupervisor
 
+logger = HeyRobotLogger(name="robot_runtime")
+
+
+class SceneCaptioner(Protocol):
+    """可选语义图像描述能力的运行时端口。"""
+
+    async def caption(
+        self, observation: RobotObservation, status: RobotStatus | None = None
+    ) -> Any: ...
+
 
 @dataclass
 class RobotRuntimeSnapshot:
@@ -30,12 +42,11 @@ class RobotRuntimeSnapshot:
 
 
 class RobotRuntime:
-    """Runtime boundary around a concrete robot driver.
+    """围绕具体机器人驱动的运行时边界。
 
-    Drivers only talk to hardware or simulation. The runtime owns deployable
-    semantics that must be consistent across supported embodiments: lifecycle,
-    observation materialization, skill acceptance, action application, and
-    health/capability inspection.
+    驱动只与硬件或仿真交互。运行时拥有所有支持的机器人本体都必须保持一致的
+    可部署语义：生命周期、观测实体化、Skill 准入、动作应用，以及健康状态和
+    能力检查。
     """
 
     def __init__(
@@ -44,6 +55,7 @@ class RobotRuntime:
         media_store: LocalMediaStore,
         *,
         safety: RobotSafetySupervisor | None = None,
+        scene_captioner: SceneCaptioner | None = None,
         image_save_every_n: int = 1,
     ) -> None:
         self.driver = driver
@@ -53,8 +65,11 @@ class RobotRuntime:
         )
         self.robot_id = driver.robot_id
         self.safety = safety or RobotSafetySupervisor()
+        self.scene_captioner = scene_captioner
         self.control_plane = RobotControlPlane()
         self._capabilities: RobotCapabilities | None = None
+        self._scene_entities: tuple[SceneEntity, ...] = ()
+        self._scene_entities_frame_id: int | None = None
 
     async def start(self) -> RobotRuntimeSnapshot:
         await self.driver.start()
@@ -81,7 +96,9 @@ class RobotRuntime:
         return await self.driver.health()
 
     async def observe(self) -> RobotObservation:
-        return (await self.perception.refresh(reason="runtime.observe")).observation
+        return self._with_scene_entities(
+            (await self.perception.refresh(reason="runtime.observe")).observation
+        )
 
     async def latest_observation(
         self, *, max_age_ms: int | None = None
@@ -92,7 +109,10 @@ class RobotRuntime:
     async def refresh_observation(
         self, *, reason: str | None = None
     ) -> PerceptionSnapshot:
-        return await self.perception.refresh(reason=reason)
+        snapshot = await self.perception.refresh(reason=reason)
+        return replace(
+            snapshot, observation=self._with_scene_entities(snapshot.observation)
+        )
 
     async def status(self) -> RobotStatus:
         return await self.driver.status()
@@ -122,7 +142,7 @@ class RobotRuntime:
         return await self.driver.reset()
 
     def build_observation(self, observation: DriverObservation) -> RobotObservation:
-        return self.perception.build_observation(observation)
+        return self._with_scene_entities(self.perception.build_observation(observation))
 
     async def _apply_perception_skill(
         self, action: RobotAction, skill_name: str
@@ -141,7 +161,7 @@ class RobotRuntime:
                 action, snapshot=snapshot, result=result
             )
         snapshot = await self._current_perception_snapshot(reason=skill_name)
-        result = self._inspect_scene(snapshot, dict(skill_action.arguments))
+        result = await self._inspect_scene(snapshot, dict(skill_action.arguments))
         return await self._perception_status(action, snapshot=snapshot, result=result)
 
     async def _current_perception_snapshot(self, *, reason: str) -> PerceptionSnapshot:
@@ -170,29 +190,96 @@ class RobotRuntime:
             metrics={**status.metrics, "last_skill_result": result},
         )
 
-    def _inspect_scene(
+    async def _inspect_scene(
         self, snapshot: PerceptionSnapshot, arguments: dict[str, Any]
     ) -> dict[str, Any]:
-        summary = _observation_summary(
-            snapshot.observation, question=arguments.get("question")
+        caption, entities = await self._caption_scene(snapshot.observation)
+        summary = (
+            f"scene={caption}"
+            if caption
+            else _observation_summary(
+                snapshot.observation, question=arguments.get("question")
+            )
         )
         return {
             "success": snapshot.has_images,
             "skill": "inspect_scene",
-            "message": "scene inspected"
-            if snapshot.has_images
-            else "camera image unavailable",
+            "message": (
+                "scene recognized"
+                if caption
+                else "camera image captured but scene recognition unavailable"
+                if snapshot.has_images
+                else "camera image unavailable"
+            ),
             "summary": summary,
             "failure_mode": None if snapshot.has_images else "camera_unavailable",
+            "semantic_available": bool(caption),
+            "entities": [_entity_payload(item) for item in entities],
             **snapshot.summary(),
         }
+
+    async def _caption_scene(
+        self, observation: RobotObservation
+    ) -> tuple[str | None, tuple[SceneEntity, ...]]:
+        """在启用视觉描述器时，返回模型生成的场景摘要。
+
+        原始相机元数据不会被当作场景描述：成功采集到一帧图像，并不能证明图像中
+        可见什么内容。
+        """
+        if self.scene_captioner is None or not observation.images:
+            return None, ()
+        try:
+            understanding = await self.scene_captioner.caption(
+                observation, await self.status()
+            )
+        except Exception:
+            logger.exception(
+                f"场景理解调用异常: robot={self.robot_id} frame={observation.frame_id}"
+            )
+            return None, ()
+        metadata = getattr(understanding, "metadata", None)
+        confidence = getattr(understanding, "confidence", 0.0)
+        if not isinstance(metadata, dict):
+            logger.warning(
+                f"场景理解结果无元数据，已丢弃: robot={self.robot_id} "
+                f"frame={observation.frame_id}"
+            )
+            return None, ()
+        if metadata.get("error") or not confidence > 0.0:
+            logger.warning(
+                f"场景理解结果不可用，已丢弃: robot={self.robot_id} "
+                f"frame={observation.frame_id} confidence={confidence} "
+                f"reason={metadata.get('error') or metadata.get('raw') or 'unknown'}"
+            )
+            return None, ()
+        summary = understanding.summary.strip()
+        entities = tuple(
+            entity
+            for entity in getattr(understanding, "entities", ())
+            if isinstance(entity, SceneEntity)
+            and entity.frame_id == observation.frame_id
+        )
+        if entities:
+            self._scene_entities = entities
+            self._scene_entities_frame_id = observation.frame_id
+        return summary or None, entities
+
+    def _with_scene_entities(self, observation: RobotObservation) -> RobotObservation:
+        cached_frame_id = self._scene_entities_frame_id
+        if cached_frame_id is not None and observation.frame_id > cached_frame_id + 6:
+            self._scene_entities = ()
+            self._scene_entities_frame_id = None
+        entities = {item.entity_id: item for item in observation.entities}
+        for item in self._scene_entities:
+            entities.setdefault(item.entity_id, item)
+        return replace(observation, entities=list(entities.values()))
 
     async def _look_around(
         self, action: RobotAction, arguments: dict[str, Any]
     ) -> dict[str, Any]:
         observations: list[dict[str, Any]] = []
         first = await self._current_perception_snapshot(reason="look_around:start")
-        observations.append(self._inspect_scene(first, arguments))
+        observations.append(await self._inspect_scene(first, arguments))
         for direction, angle in (("left", 25.0), ("right", 50.0), ("left", 25.0)):
             motion = await self._apply_internal_skill(
                 action,
@@ -208,7 +295,7 @@ class RobotRuntime:
                     "observations": observations,
                 }
             snapshot = await self._current_perception_snapshot(reason="look_around")
-            observations.append(self._inspect_scene(snapshot, arguments))
+            observations.append(await self._inspect_scene(snapshot, arguments))
         ok = any(item.get("success") for item in observations)
         return {
             "success": ok,
@@ -245,7 +332,15 @@ class RobotRuntime:
         self, parent: RobotAction, name: str, arguments: dict[str, Any]
     ) -> RobotStatus:
         internal = RobotSkillAction(name, arguments).to_robot_action(
-            SkillIntent(envelope=parent.envelope, skill_id=parent.skill_id, name=name)
+            SkillIntent(
+                envelope=parent.envelope,
+                skill_id=parent.skill_id,
+                task_id=parent.task_id,
+                intent_kind=parent.intent_kind,
+                name=name,
+                arguments=dict(arguments),
+                objective=f"internal {name} for {parent.skill_id}",
+            )
         )
         decision = self.safety.evaluate_action(
             internal,
@@ -431,3 +526,16 @@ def _marker_detection(marker_id: int | None, pts: Any, shape: Any) -> dict[str, 
 
 def _marker_area_key(item: dict[str, Any]) -> float:
     return float(item.get("area", 0.0))
+
+
+def _entity_payload(entity: SceneEntity) -> dict[str, object]:
+    return {
+        "entity_id": entity.entity_id,
+        "type": entity.entity_type,
+        "attributes": entity.attributes,
+        "relations": [
+            {"predicate": relation.predicate, "object_id": relation.object_id}
+            for relation in entity.relations
+        ],
+        "frame_id": entity.frame_id,
+    }

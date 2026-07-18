@@ -1,46 +1,19 @@
-"""Class-based robot agent tools: one :class:`Tool` subclass per file.
+"""单一 Robot Agent 使用的仅提案式工具。"""
 
-Foundation
-----------
-* :class:`Tool`: abstract base class
-* :class:`ToolContext`: dependency-injection container
-* :class:`ToolRegistry`: class-based registry with cast+validate pipeline
-* :class:`ToolLoader`: auto-discovery via ``pkgutil``
-
-Schema types
-------------
-* :class:`StringSchema`, :class:`IntegerSchema`, :class:`NumberSchema`
-* :class:`BooleanSchema`, :class:`ArraySchema`, :class:`ObjectSchema`
-* :func:`tool_parameters_schema`: convenience builder
-* :func:`tool_parameters`: class decorator
-"""
-
-from hey_robot.cognition.tools.base import Tool, tool_parameters
-from hey_robot.cognition.tools.context import ToolContext, ToolTurnContext
-from hey_robot.cognition.tools.loader import ToolLoader
-from hey_robot.cognition.tools.registry import ToolRegistry
-from hey_robot.cognition.tools.schema import (
-    ArraySchema,
-    BooleanSchema,
-    IntegerSchema,
-    NumberSchema,
-    ObjectSchema,
-    StringSchema,
-    tool_parameters_schema,
+from hey_robot.cognition.tools.robot import (
+    CompleteTaskTool,
+    ControlTaskTool,
+    RequestObservationTool,
+    RequestSkillTool,
+    ToolDependencies,
+    ToolRegistry,
 )
 
 __all__ = [
-    "ArraySchema",
-    "BooleanSchema",
-    "IntegerSchema",
-    "NumberSchema",
-    "ObjectSchema",
-    "StringSchema",
-    "Tool",
-    "ToolContext",
-    "ToolLoader",
+    "CompleteTaskTool",
+    "ControlTaskTool",
+    "RequestObservationTool",
+    "RequestSkillTool",
+    "ToolDependencies",
     "ToolRegistry",
-    "ToolTurnContext",
-    "tool_parameters",
-    "tool_parameters_schema",
 ]

@@ -146,6 +146,15 @@ def build_scene_captioner(
             if isinstance(scene, dict):
                 cfg = scene
                 template_root = cfg.get("template_root") or template_root
+        # 配置了 provider 就表示显式请求场景 caption。
+        # runtime 配置统一以 ``providers`` 为单一来源；
+        # deployment 不需要重复的 perception 开关。
+        if not cfg:
+            providers = agent.settings.get("providers")
+            if isinstance(providers, dict) and isinstance(
+                providers.get("scene_captioner"), dict
+            ):
+                cfg = {"enabled": True, "purpose": "scene_captioner"}
     else:
         template_root = None
     if not bool(cfg.get("enabled", False)):

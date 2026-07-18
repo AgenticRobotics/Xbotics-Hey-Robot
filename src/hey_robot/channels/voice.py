@@ -18,11 +18,10 @@ from hey_robot.user_reply import (
 
 
 class VoiceChannel:
-    """Local voice channel for embodied interaction.
+    """用于具身交互的本地语音渠道。
 
-    The channel owns only the user-facing audio interface. It converts local
-    speech into normal UserTurn messages and optionally speaks AgentReply text
-    back to the operator.
+    本渠道只拥有面向用户的音频接口：它将本地语音转换为普通 `UserTurn` 消息，
+    并可选地向操作者播报 `AgentReply` 文本。
     """
 
     def __init__(self, context: ChannelContext) -> None:
@@ -45,6 +44,11 @@ class VoiceChannel:
         async def on_text(text: str, metadata: dict) -> None:
             if _is_nonsense_asr(text):
                 return
+            if _asr_confidence_rejected(
+                metadata, self.config.activation.min_command_confidence
+            ):
+                await self.loop.speak("我没有听清，请在唤醒后再说一遍。")
+                return
             if _needs_voice_clarification(text):
                 await self.loop.speak("请说清楚要观察哪里，或要我做哪个动作。")
                 return
@@ -59,6 +63,9 @@ class VoiceChannel:
                 chat_id=self.config.chat_id,
                 chat_type="voice",
                 sender_id=self.config.sender_id,
+                # 语音没有上游 broker message id。音频循环会在 turn 进入 Gateway
+                # 之前分配这个 receipt。
+                message_id=_voice_utterance_id(metadata),
                 deployment_id=self.context.deployment_id,
                 timestamp=time.time(),
             )
@@ -116,10 +123,9 @@ _REPEATED_CHAR_PATTERN = re.compile(r"(.)\1{2,}")
 
 
 def _is_nonsense_asr(text: str) -> bool:
-    """Drop ASR output that is clearly noise artifacts, not real speech.
+    """丢弃明显是噪声伪影、不是有效语音的 ASR 输出。
 
-    Catches patterns like ``请请请`` or ``啊啊啊`` where the ASR engine
-    hallucinates repeated characters from ambient sound.
+    用于过滤 ASR 引擎从环境声中误识别出的重复字符模式。
     """
     return bool(_REPEATED_CHAR_PATTERN.search(str(text or "")))
 
@@ -167,7 +173,7 @@ def _needs_voice_clarification(text: str) -> bool:
 
 
 def _is_specific_action_intent(text: str) -> bool:
-    """Return True when the text carries actionable intent despite voice vagueness."""
+    """即使语音表述含糊，只要文本含有可执行意图便返回 True。"""
     markers = (
         "跟随",
         "跟着",
@@ -190,3 +196,27 @@ def _voice_event_key(event: RuntimeEvent) -> str:
             payload.get("summary") or payload.get("error"),
         )
     )
+
+
+def _voice_utterance_id(metadata: dict) -> str | None:
+    voice = metadata.get("voice") if isinstance(metadata, dict) else None
+    if not isinstance(voice, dict):
+        return None
+    value = voice.get("utterance_id")
+    return str(value).strip() or None if value is not None else None
+
+
+def _asr_confidence_rejected(metadata: dict, minimum: float) -> bool:
+    """仅拒绝明确偏低的 ASR 分数；未知分数绝不视为高分。"""
+    if minimum <= 0:
+        return False
+    audio = metadata.get("audio") if isinstance(metadata, dict) else None
+    if not isinstance(audio, dict):
+        return False
+    value = audio.get("asr_confidence")
+    if value is None:
+        return False
+    try:
+        return float(value) < minimum
+    except (TypeError, ValueError):
+        return True

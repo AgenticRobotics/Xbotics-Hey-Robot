@@ -10,13 +10,15 @@ from typing import Any, TypedDict
 
 logger = logging.getLogger(__name__)
 
-from hey_robot.cognition import RobotAgentService, TaskSupervisorService
+from hey_robot.cognition.autonomous_agent_service import AutonomousAgentService
+from hey_robot.cognition.perception.scene import build_scene_captioner
 from hey_robot.config import DeploymentConfig
 from hey_robot.config.validation import validate_deployment
 from hey_robot.gateway import GatewayService
 from hey_robot.human_follow import HumanFollowService
 from hey_robot.logging import HeyRobotLogger
 from hey_robot.robot_runtime import RobotService
+from hey_robot.robot_runtime.media import MediaResolver
 from hey_robot.skill_os.controller import SkillControllerService
 from hey_robot.skill_os.registry import registry_from_config
 
@@ -46,7 +48,7 @@ class DeploymentInspection(TypedDict):
 
 
 class DeploymentRunner:
-    """Run a complete local deployment in one asyncio process."""
+    """在一个 asyncio 进程中运行完整的本地部署。"""
 
     def __init__(
         self, config: DeploymentConfig, *, episode_dir: str | Path | None = None
@@ -118,7 +120,15 @@ class DeploymentRunner:
         robot = None
         skill_catalog = registry_from_config(self.config).robot_skill_catalog()
         if self.config.robots:
-            robot = RobotService(self.config, skill_catalog=skill_catalog)
+            robot = RobotService(
+                self.config,
+                skill_catalog=skill_catalog,
+                scene_captioner_factory=lambda store: build_scene_captioner(
+                    self.config,
+                    self.config.default_agent_id(),
+                    image_resolver=MediaResolver(store),
+                ),
+            )
             services.append(ManagedService("robot", robot.start, robot.stop))
             if bool(
                 self.config.deployment.bus.options.get(
@@ -136,19 +146,10 @@ class DeploymentRunner:
             services.append(
                 ManagedService("skill-controller", skills.start, skills.stop)
             )
-        if any(spec.enabled for spec in self.config.agents.values()):
-            supervisor = TaskSupervisorService(
-                self.config, episode_dir=self.episode_dir
-            )
-            services.append(
-                ManagedService("task-supervisor", supervisor.start, supervisor.stop)
-            )
         for agent_id, spec in self.config.agents.items():
             if not spec.enabled:
                 continue
-            agent = RobotAgentService(
-                self.config, agent_id=agent_id, episode_dir=self.episode_dir
-            )
+            agent = AutonomousAgentService(self.config, agent_id=agent_id)
             services.append(
                 ManagedService(f"agent:{agent_id}", agent.start, agent.stop)
             )

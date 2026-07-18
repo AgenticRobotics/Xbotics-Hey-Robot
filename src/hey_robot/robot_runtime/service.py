@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from typing import Any
 
 from hey_robot.bus.factory import create_bus_client
@@ -20,33 +21,41 @@ from hey_robot.protocol.messages import from_payload, to_payload
 from hey_robot.robot_runtime.manager import RobotManager
 from hey_robot.robot_runtime.media import LocalMediaStore
 from hey_robot.robot_runtime.observations.frame_stream import encode_frame_packet
-from hey_robot.robot_runtime.runtime import RobotRuntime
+from hey_robot.robot_runtime.runtime import RobotRuntime, SceneCaptioner
 from hey_robot.robot_runtime.safety import RobotSafetyError
 
 logger = HeyRobotLogger(name="robot")
 
 
 class RobotService:
-    """Runs robot drivers and exposes them through robot action topics."""
+    """运行机器人驱动，并通过机器人动作 Topic 暴露它们。"""
 
     def __init__(
         self,
         config: DeploymentConfig,
         *,
         skill_catalog: SkillContractCatalog | None = None,
+        scene_captioner_factory: Callable[[LocalMediaStore], SceneCaptioner]
+        | None = None,
     ) -> None:
         self.config = config
         self.topics = Topics()
         self.manager = RobotManager(config, skill_catalog=skill_catalog)
-        self.bus = create_bus_client(config.deployment.bus)
+        self.bus = create_bus_client(config.deployment.bus, role="robot")
         self.events = BusEventPublisher(self.bus, self.topics)
         self.media_store = LocalMediaStore(
             config.resources.media_root, max_items=config.resources.media_max_items
+        )
+        scene_captioner = (
+            scene_captioner_factory(self.media_store)
+            if scene_captioner_factory is not None
+            else None
         )
         self.runtimes = {
             driver.robot_id: RobotRuntime(
                 driver,
                 self.media_store,
+                scene_captioner=scene_captioner,
                 image_save_every_n=config.resources.media_image_save_every_n,
             )
             for driver in self.manager.all()
@@ -65,7 +74,7 @@ class RobotService:
         self._base_streams: dict[str, dict[str, Any]] = {}
 
     def get(self, robot_id: str):
-        """Return the raw driver for a robot id (used by SkillController for VLA I/O adapter injection)."""
+        """返回指定 robot_id 的原始驱动，供 SkillController 注入 VLA I/O adapter。"""
         return self.manager.get(robot_id)
 
     async def start(self) -> None:
@@ -116,11 +125,10 @@ class RobotService:
         await self.bus.close()
 
     async def _merged_observation_loop(self) -> None:
-        """Single observation loop that produces both RobotObservation and camera frames.
+        """同时产出 RobotObservation 和相机帧的单一观测循环。
 
-        One ``driver.observe()`` call per cycle feeds both the observation/status
-        pipeline AND the raw camera frame stream.  The loop runs at the faster of
-        ``publish_hz`` and ``camera_stream_hz`` so neither consumer starves.
+        每个周期只调用一次 ``driver.observe()``，同时供给观测/状态流水线和原始相机帧流。
+        循环频率取 ``publish_hz`` 与 ``camera_stream_hz`` 中更快的一方，避免任一消费者饿死。
         """
         period = 1.0 / max(self.publish_hz, self.camera_stream_hz, 0.1)
         while not self._stop.is_set():
@@ -131,7 +139,7 @@ class RobotService:
                 )
                 status = self._status_for_publish(await runtime.status())
 
-                # Publish robot observation + status.
+                # 发布机器人观测和状态。
                 if self._should_publish_observation(snapshot.observation):
                     await self.bus.publish(
                         self.topics.robot_observation,
@@ -144,7 +152,7 @@ class RobotService:
                         f"state={status.state} success={status.success}"
                     )
 
-                # Publish raw camera frames from the same driver observation.
+                # 从同一次 driver observation 发布原始相机帧。
                 driver_obs = snapshot.driver_observation
                 if driver_obs is not None:
                     for asset in driver_obs.assets:
@@ -238,7 +246,7 @@ class RobotService:
             status = RobotStatus(
                 envelope=action.envelope,
                 frame_id=None,
-                state="failed",
+                state="failed",  # type: ignore[arg-type]
                 task=None,
                 skill_id=action.skill_id or None,
                 success=False,
@@ -347,6 +355,7 @@ class RobotService:
             artifacts=observation.artifacts,
             proprioception=observation.proprioception,
             task=observation.task,
+            entities=observation.entities,
             raw=observation.raw,
         )
 

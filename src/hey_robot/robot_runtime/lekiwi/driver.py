@@ -23,7 +23,7 @@ from hey_robot.robot_runtime.so101.driver import _camera_ready, _failure_summary
 
 
 class LeKiwiDriver:
-    """Standalone LeKiwi mobile-base driver for Hey Robot."""
+    """Hey Robot 使用的独立 LeKiwi 移动底盘驱动。"""
 
     def __init__(self, context: RobotDriverContext) -> None:
         self.context = context
@@ -148,7 +148,7 @@ class LeKiwiDriver:
         return RobotStatus(
             envelope=self._envelope(),
             frame_id=self.frame_id,
-            state=self.state,
+            state=self.state,  # type: ignore[arg-type]
             success=None,
             error=self.last_error,
             metrics={

@@ -6,22 +6,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 COGNITION_ROOT = ROOT / "src" / "hey_robot" / "cognition"
 
-ALLOWED_SKILL_INTENT_CONSTRUCTORS = {
-    Path("src/hey_robot/cognition/skill_gateway.py"),
-    Path("src/hey_robot/cognition/robot_agent.py"),
-}
-
 
 def _cognition_source_files() -> list[Path]:
     return sorted(path for path in COGNITION_ROOT.rglob("*.py") if path.is_file())
 
 
-def test_agent_layer_does_not_construct_skill_intents_outside_gateway() -> None:
+def test_cognition_layer_never_constructs_skill_intents() -> None:
     offenders: list[str] = []
     for path in _cognition_source_files():
         rel_path = path.relative_to(ROOT)
-        if rel_path in ALLOWED_SKILL_INTENT_CONSTRUCTORS:
-            continue
         text = path.read_text(encoding="utf-8")
         if re.search(r"\bSkillIntent\s*\(", text):
             offenders.append(str(rel_path))

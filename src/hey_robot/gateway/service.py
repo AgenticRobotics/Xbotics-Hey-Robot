@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import re
 import time
 from dataclasses import replace
@@ -16,33 +18,36 @@ from hey_robot.channels import (
     VoiceChannel,
     WebChannel,
 )
-from hey_robot.cognition.memory import SceneMemoryStore
-from hey_robot.cognition.task_run import TaskRunStore
-from hey_robot.cognition.tasks import TaskSessionQueryService
-from hey_robot.config import DeploymentConfig
-from hey_robot.episode import (
-    JsonlEpisodeStore,
-    RobotEpisodeStateStore,
-    allocate_episode,
+from hey_robot.cognition.runtime.agent_task_store import (
+    AgentTask,
+    AgentTaskStore,
 )
+from hey_robot.config import DeploymentConfig
+from hey_robot.episode import JsonlEpisodeStore, allocate_episode
 from hey_robot.episode.scope import DEFAULT_EPISODE_DIMENSIONS
 from hey_robot.events import EventKind, RuntimeEvent
 from hey_robot.events.bus import BusEventPublisher
 from hey_robot.events.store import RuntimeEventStore
 from hey_robot.gateway.identity import ClaimedBinding, IdentityResolver, PendingBinding
+from hey_robot.gateway.receipts import InteractionReceiptStore
 from hey_robot.health import HealthReportService
-from hey_robot.interaction import InteractionStateStore
 from hey_robot.logging import HeyRobotLogger
 from hey_robot.protocol import (
     AgentReply,
+    ConversationResult,
+    ConversationTurn,
     Envelope,
     RobotStatus,
+    SkillControl,
     SkillEvent,
     SkillResult,
     Topics,
     UserTurn,
 )
-from hey_robot.protocol.messages import from_payload, to_payload
+from hey_robot.protocol.messages import (
+    from_payload,
+    to_payload,
+)
 from hey_robot.skill_os import SkillStore
 
 logger = HeyRobotLogger(name="gateway")
@@ -53,7 +58,7 @@ _ROBOT_STATUS_PERSIST_INTERVAL_SEC = 5.0
 
 
 class GatewayService:
-    """Channel gateway that normalizes inbound turns and forwards outbound replies."""
+    """负责渠道输入输出标准化，但不修改任务状态的 Gateway。"""
 
     def __init__(
         self, config: DeploymentConfig, *, episode_dir: str | Path | None = None
@@ -62,10 +67,8 @@ class GatewayService:
         self.topics = Topics()
         self.episode_root = Path(episode_dir or config.resources.episodes_root)
         self.episodes = JsonlEpisodeStore(self.episode_root)
-        self.task_runs = TaskRunStore(self.episode_root)
-        self.robot_states = RobotEpisodeStateStore(self.episode_root)
         self.channels = ChannelManager()
-        self.bus = create_bus_client(config.deployment.bus)
+        self.bus = create_bus_client(config.deployment.bus, role="gateway")
         self.events = BusEventPublisher(self.bus, self.topics)
         self.event_store = RuntimeEventStore(
             Path(config.resources.runtime_dir) / "events",
@@ -75,19 +78,18 @@ class GatewayService:
             Path(config.resources.runtime_dir) / "skills",
             max_items=config.resources.events_max_items,
         )
-        self.scene_memory = SceneMemoryStore(
-            Path(config.resources.runtime_dir) / "scene_memory",
-            max_items=config.resources.events_max_items,
+        task_path = (
+            Path(config.resources.runtime_dir)
+            / config.deployment.id
+            / "sustained_tasks.sqlite3"
         )
-        self.interaction_states = InteractionStateStore(
-            Path(config.resources.runtime_dir) / "interaction"
+        self.task_store = AgentTaskStore(task_path)
+        self.interaction_receipts = InteractionReceiptStore(
+            Path(config.resources.runtime_dir)
+            / config.deployment.id
+            / "interaction_receipts.sqlite3"
         )
-        self.task_views = TaskSessionQueryService(
-            task_store=self.task_runs,
-            scene_memory=self.scene_memory,
-            skill_store=self.skill_store,
-            interaction_store=self.interaction_states,
-        )
+        self.latest_robot_status: dict[str, RobotStatus] = {}
         self.identity = IdentityResolver(
             config.identity,
             state_path=Path(config.resources.runtime_dir)
@@ -112,13 +114,17 @@ class GatewayService:
         await self.events.publish(event)
         self.event_store.append(event)
         await self.bus.subscribe([self.topics.agent_reply], self._on_agent_reply)
+        await self.bus.subscribe(
+            [self.topics.conversation_result], self._on_conversation_result
+        )
         await self.bus.subscribe([self.topics.runtime_event], self._on_runtime_event)
         await self.bus.subscribe([self.topics.robot_status], self._on_robot_status)
         await self.bus.subscribe([self.topics.skill_event], self._on_skill_event)
         await self.bus.subscribe([self.topics.skill_result], self._on_skill_result)
         logger.info(
-            f"gateway subscribed {self.topics.agent_reply}, {self.topics.runtime_event}, "
-            f"{self.topics.robot_status}, {self.topics.skill_event}, {self.topics.skill_result}"
+            f"gateway subscribed {self.topics.agent_reply}, {self.topics.conversation_result}, {self.topics.runtime_event}, "
+            f"{self.topics.robot_status}, {self.topics.skill_event}, {self.topics.skill_result}, "
+            f"{self.topics.skill_control_result}"
         )
         await self.channels.start_all(self._on_user_turn)
         self._log_channel_ready()
@@ -135,6 +141,7 @@ class GatewayService:
         self.event_store.append(event)
         await self.channels.stop_all()
         await self.bus.close()
+        self.interaction_receipts.close()
 
     async def _on_user_turn(self, turn: UserTurn) -> None:
         if await self._try_handle_identity_binding_turn(turn):
@@ -149,56 +156,143 @@ class GatewayService:
         envelope = turn.envelope.child(
             agent_id=agent_id, robot_id=robot_id, user_id=identity.user_id
         )
+        payload_hash = self._interaction_payload_hash(turn, envelope)
+        interaction_id = self._interaction_id(envelope, payload_hash)
+        if not self.interaction_receipts.claim(interaction_id, payload_hash):
+            logger.info(f"Ignoring replayed interaction {interaction_id}")
+            return
         allocation = allocate_episode(
-            envelope, agent_id=agent_id, dimensions=self._episode_dimensions(envelope)
-        )
-        envelope = envelope.child(episode_id=allocation.episode_id)
-        forwarded = UserTurn(
-            envelope=envelope,
-            text=turn.text,
-            media=turn.media,
-            intent=turn.intent,
-            metadata=turn.metadata,
+            envelope,
+            agent_id=agent_id,
+            dimensions=self._episode_dimensions(envelope),
         )
         self.episodes.ensure(
             allocation.episode_id, allocation.scope, allocation.aliases
         )
-        self.robot_states.ensure(
-            allocation.episode_id, agent_id=agent_id, robot_id=robot_id
+        self.episodes.append_user_turn(
+            allocation.episode_id,
+            replace(turn, envelope=envelope.child(episode_id=allocation.episode_id)),
         )
-        self.episodes.append_user_turn(allocation.episode_id, forwarded)
-        active_task = self.task_runs.load_active(allocation.episode_id)
-        self.interaction_states.record_turn(
-            forwarded,
-            active_task_id=active_task.task_id if active_task is not None else None,
-            pending_confirmation=(
-                dict(active_task.pending_confirmation)
-                if active_task is not None
-                and isinstance(active_task.pending_confirmation, dict)
-                else None
+        if await self._handle_safety_command(turn.text, envelope, interaction_id):
+            self.interaction_receipts.complete(interaction_id, "safety_command")
+            return
+        session_key = self._session_key(envelope)
+        await self.bus.publish(
+            self.topics.conversation_turn,
+            to_payload(
+                ConversationTurn(
+                    envelope.child(episode_id=allocation.episode_id),
+                    session_key,
+                    interaction_id,
+                    turn.text,
+                )
             ),
-            robot_busy=(
-                active_task is not None
-                and active_task.status not in {"completed", "failed", "cancelled"}
-            ),
         )
-        event = RuntimeEvent.make(
-            EventKind.EPISODE_ALLOCATED,
-            source="gateway",
-            trace_id=envelope.trace_id,
-            episode_id=allocation.episode_id,
-            agent_id=agent_id,
-            robot_id=robot_id,
-            channel=envelope.channel,
-            payload={"aliases": allocation.aliases, "user_id": envelope.user_id},
+        self.interaction_receipts.complete(interaction_id, "conversation_turn")
+
+    async def _on_conversation_result(self, _topic: str, payload: dict) -> None:
+        result = from_payload(ConversationResult, payload)
+        await self._send_reply(AgentReply(envelope=result.envelope, text=result.text))
+
+    def _session_key(self, envelope: Envelope) -> str:
+        principal = (
+            envelope.user_id
+            or f"{envelope.channel or 'unknown'}:{envelope.chat_id or envelope.sender_id or 'anonymous'}"
         )
-        await self.events.publish(event)
-        self.event_store.append(event)
-        await self.bus.publish(self.topics.user_turn, to_payload(forwarded))
-        logger.debug(
-            f"gateway forwarded turn trace={forwarded.envelope.trace_id} "
-            f"episode={allocation.episode_id} agent={agent_id} robot={robot_id}"
+        return f"{self.config.deployment.id}:{envelope.agent_id or self._agent_id(None)}:{principal}"
+
+    async def _handle_safety_command(
+        self, text: str, envelope: Envelope, interaction_id: str
+    ) -> bool:
+        """路由高优先级控制，无需等待 LLM 回复。"""
+        normalized = " ".join(str(text or "").lower().split())
+        compact = normalized.replace(" ", "")
+        emergency = {
+            "emergency stop",
+            "emergencystop",
+            "e-stop",
+            "estop",
+            "\u6025\u505c",
+            "\u7d27\u6025\u505c\u6b62",
+        }
+        if compact in {item.replace(" ", "") for item in emergency}:
+            command = SkillControl(
+                envelope,
+                self._command_id(envelope, interaction_id, "emergency_stop"),
+                "emergency_stop",
+                target_skill_id=None,
+                task_id=None,
+                reason="gateway emergency stop",
+            )
+            await self.bus.publish(self.topics.skill_control, to_payload(command))
+            await self._send_reply(
+                AgentReply(envelope=envelope, text="EMERGENCY_STOP_REQUESTED")
+            )
+            return True
+
+        cancel = {
+            "cancel current task",
+            "cancel task",
+            "stop current task",
+            "\u53d6\u6d88\u5f53\u524d\u4efb\u52a1",
+        }
+        if compact in {item.replace(" ", "") for item in cancel}:
+            return False
+
+        confirmations = {"confirm", "yes", "\u786e\u8ba4", "\u7ee7\u7eed"}
+        if compact in confirmations:
+            return False
+
+        query = {
+            "status",
+            "task status",
+            "current progress",
+            "\u5f53\u524d\u8fdb\u5ea6",
+            "\u673a\u5668\u4eba\u72b6\u6001",
+        }
+        if compact in {item.replace(" ", "") for item in query}:
+            return False
+        return False
+
+    @staticmethod
+    def _interaction_id(envelope: Envelope, payload_hash: str) -> str:
+        # transport message_id/turn_id 用于识别重试投递。本地输入如果没有该标识，
+        # 会获得一个按 payload 作用域生成的 receipt，避免同一进程调用方中共享 Envelope
+        # 的不同命令被误吞掉。
+        source = envelope.message_id or envelope.turn_id
+        if source is None:
+            source = f"{envelope.trace_id}:{payload_hash}"
+        raw = "|".join(
+            (
+                str(envelope.deployment_id or ""),
+                str(envelope.channel or ""),
+                str(envelope.account_id or ""),
+                str(envelope.user_id or envelope.sender_id or ""),
+                str(source or ""),
+            )
         )
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    @staticmethod
+    def _interaction_payload_hash(turn: UserTurn, envelope: Envelope) -> str:
+        payload = {
+            "text": turn.text,
+            "media": [item.uri for item in turn.media],
+            "channel": envelope.channel,
+            "user_id": envelope.user_id,
+            "message_id": envelope.message_id,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    @staticmethod
+    def _command_id(envelope: Envelope, interaction_id: str, action: str) -> str:
+        raw = "|".join((str(envelope.deployment_id or ""), interaction_id, action))
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    async def _send_reply(self, reply: AgentReply) -> None:
+        await self.bus.publish(self.topics.agent_reply, to_payload(reply))
 
     async def _on_agent_reply(self, _topic: str, payload: dict) -> None:
         reply = self._materialize_reply(from_payload(AgentReply, payload))
@@ -208,17 +302,6 @@ class GatewayService:
         )
         if reply.envelope.episode_id:
             self.episodes.append_agent_reply(reply.envelope.episode_id, reply)
-            active_task = self.task_runs.load_active(reply.envelope.episode_id)
-            self.interaction_states.set_pending_confirmation(
-                reply.envelope.episode_id,
-                (
-                    dict(active_task.pending_confirmation)
-                    if active_task is not None
-                    and isinstance(active_task.pending_confirmation, dict)
-                    else None
-                ),
-            )
-            self.interaction_states.record_reply(reply)
         await self.channels.send(reply)
 
     def _materialize_reply(self, reply: AgentReply) -> AgentReply:
@@ -240,9 +323,6 @@ class GatewayService:
             self.episodes.ensure(
                 allocation.episode_id, allocation.scope, allocation.aliases
             )
-            self.robot_states.ensure(
-                allocation.episode_id, agent_id=agent_id, robot_id=robot_id
-            )
             resolved_envelope = resolved_envelope.child(
                 episode_id=allocation.episode_id
             )
@@ -261,6 +341,8 @@ class GatewayService:
 
     async def _on_robot_status(self, _topic: str, payload: dict) -> None:
         status = from_payload(RobotStatus, payload)
+        if status.envelope.robot_id:
+            self.latest_robot_status[status.envelope.robot_id] = status
         event = RuntimeEvent.make(
             EventKind.ROBOT_STATUS,
             source="robot",
@@ -290,7 +372,6 @@ class GatewayService:
     async def _on_skill_event(self, _topic: str, payload: dict) -> None:
         event = from_payload(SkillEvent, payload)
         self.skill_store.append(event)
-        self.robot_states.apply_skill_event(event)
         ux_metadata = event.metadata.get("ux")
         ux_payload = dict(ux_metadata) if isinstance(ux_metadata, dict) else None
         await self.channels.publish_event(
@@ -317,8 +398,7 @@ class GatewayService:
         )
 
     async def _on_skill_result(self, _topic: str, payload: dict) -> None:
-        result = from_payload(SkillResult, payload)
-        self.robot_states.apply_skill_result(result)
+        from_payload(SkillResult, payload)
 
     async def _web_history(self, envelope: Envelope, limit: int) -> dict:
         agent_id = self._agent_id(envelope.agent_id)
@@ -331,9 +411,7 @@ class GatewayService:
         allocation = allocate_episode(
             scoped, agent_id=agent_id, dimensions=self._episode_dimensions(scoped)
         )
-        records = await asyncio.to_thread(
-            self.episodes.history, allocation.episode_id, limit=limit
-        )
+        records = self.episodes.history(allocation.episode_id, limit=limit)
         return {
             "episode_id": allocation.episode_id,
             "agent_id": agent_id,
@@ -352,72 +430,46 @@ class GatewayService:
         }
 
     async def _web_cockpit(self, episode_id: str) -> dict[str, Any] | None:
-        view = self.task_views.view_for_episode(episode_id)
-        if view is None:
+        del episode_id
+        tasks = self.task_store.recent_tasks(limit=1)
+        if not tasks:
             return None
+        task = tasks[0]
         return {
-            "episode_id": episode_id,
-            "view": view.to_dict(),
-            "health": HealthReportService(
-                self.config,
-                episode_dir=self.episode_root,
-            ).payload(robot_id=view.robot_id),
+            "task": _task_payload(task),
+            "steps": [
+                _step_payload(step)
+                for step in self.task_store.recent_steps(task.task_id)
+            ],
+            "health": HealthReportService(self.config).payload(robot_id=task.robot_id),
         }
 
     async def _web_tasks_list(self, limit: int) -> dict[str, Any]:
-        tasks = await asyncio.to_thread(self.task_runs.list_recent, limit=limit)
         return {
             "tasks": [
-                {
-                    "task_id": t.task_id,
-                    "episode_id": t.episode_id,
-                    "robot_id": t.robot_id,
-                    "agent_id": t.agent_id,
-                    "root_task": t.root_task,
-                    "status": t.status,
-                    "task_success": t.task_success,
-                    "failure_reason": t.failure_reason,
-                    "retry_count": t.retry_count,
-                    "recovery_count": t.recovery_count,
-                    "skill_ids": t.skill_ids,
-                    "created_at": t.created_at,
-                    "updated_at": t.updated_at,
-                }
-                for t in tasks
+                _task_payload(task) for task in self.task_store.recent_tasks(limit)
             ]
         }
 
     async def _web_runtime_summary(self, limit: int) -> dict[str, Any]:
-        tasks, robot_states, skills, events = await asyncio.gather(
-            asyncio.to_thread(self.task_runs.list_recent, limit=limit),
-            asyncio.to_thread(self.robot_states.list_states),
-            asyncio.to_thread(self.skill_store.recent, limit=limit),
-            asyncio.to_thread(self.event_store.recent, limit=limit),
-        )
+        tasks = self.task_store.recent_tasks(limit)
+        skills = self.skill_store.recent(limit=limit)
+        events = self.event_store.recent(limit=limit)
         return {
-            "tasks": [
-                {
-                    "task_id": t.task_id,
-                    "episode_id": t.episode_id,
-                    "robot_id": t.robot_id,
-                    "root_task": t.root_task,
-                    "status": t.status,
-                    "task_success": t.task_success,
-                    "failure_reason": t.failure_reason,
-                    "updated_at": t.updated_at,
-                }
-                for t in tasks
-            ],
+            "tasks": [_task_payload(task) for task in tasks],
             "robots": [
                 {
-                    "episode_id": rs.episode_id,
-                    "robot_id": rs.robot_id,
-                    "state": _robot_state_name(rs.last_status),
-                    "status": _robot_status_summary(rs.last_status),
-                    "active_task": rs.active_task,
-                    "updated_at": rs.updated_at,
+                    "robot_id": status.envelope.robot_id,
+                    "state": status.state,
+                    "status": {
+                        "frame_id": status.frame_id,
+                        "success": status.success,
+                        "error": status.error,
+                        "battery_percentage": status.battery_percentage,
+                    },
+                    "updated_at": status.envelope.timestamp,
                 }
-                for rs in (robot_states or [])
+                for status in self.latest_robot_status.values()
             ],
             "skills": list(skills),
             "events": [
@@ -438,44 +490,25 @@ class GatewayService:
             ],
             "stats": {
                 "task_count": len(tasks),
-                "robot_count": len(robot_states or []),
+                "robot_count": len(self.latest_robot_status),
                 "skill_count": len(skills),
                 "event_count": len(events or []),
             },
         }
 
     async def _web_episode_task(self, episode_id: str) -> dict[str, Any] | None:
-        tasks = await asyncio.to_thread(self.task_runs.list_for_episode, episode_id)
+        del episode_id
+        tasks = self.task_store.recent_tasks(limit=1)
         if not tasks:
             return None
         task = tasks[0]
-        robot_state = await asyncio.to_thread(self.robot_states.load, episode_id)
-        result: dict[str, Any] = {
-            "episode_id": episode_id,
-            "task": {
-                "task_id": task.task_id,
-                "episode_id": task.episode_id,
-                "robot_id": task.robot_id,
-                "agent_id": task.agent_id,
-                "root_task": task.root_task,
-                "status": task.status,
-                "task_success": task.task_success,
-                "failure_reason": task.failure_reason,
-                "retry_count": task.retry_count,
-                "recovery_count": task.recovery_count,
-                "skill_ids": task.skill_ids,
-                "created_at": task.created_at,
-                "updated_at": task.updated_at,
-                "attempts": [a.to_dict() for a in (task.attempts or [])],
-            },
+        return {
+            "task": _task_payload(task),
+            "steps": [
+                _step_payload(step)
+                for step in self.task_store.recent_steps(task.task_id)
+            ],
         }
-        if robot_state is not None:
-            result["robot"] = (
-                robot_state.to_dict()
-                if hasattr(robot_state, "to_dict")
-                else robot_state
-            )
-        return result
 
     async def create_identity_binding(
         self, envelope: Envelope, ttl_sec: float = 600.0
@@ -661,6 +694,39 @@ class GatewayService:
             "linked_target_count": len(linked_targets),
             "linked_targets": linked_targets,
         }
+
+
+def _task_payload(task: AgentTask) -> dict[str, Any]:
+    return {
+        "task_id": task.task_id,
+        "session_key": task.session_key,
+        "robot_id": task.robot_id,
+        "objective": task.objective,
+        "ui_summary": task.ui_summary,
+        "status": task.status,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+        "step_count": task.step_count,
+        "continuation_count": task.continuation_count,
+        "last_error": task.last_error,
+        "final_recap": task.final_recap,
+    }
+
+
+def _step_payload(step: Any) -> dict[str, Any]:
+    return {
+        "step_id": step.step_id,
+        "task_id": step.task_id,
+        "sequence": step.sequence,
+        "skill": step.proposal.skill_name,
+        "intent_kind": step.proposal.intent_kind,
+        "objective": step.proposal.objective,
+        "status": step.outcome.status,
+        "summary": step.outcome.user_summary,
+        "evidence_ids": list(step.evidence_ids),
+        "started_at": step.started_at,
+        "completed_at": step.completed_at,
+    }
 
 
 def _compact_status_metrics(metrics: dict[str, Any]) -> dict[str, Any]:

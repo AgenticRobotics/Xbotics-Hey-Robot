@@ -29,11 +29,11 @@ class _Session:
 
 
 class HumanFollowService:
-    """Persistent NATS data-plane service for the human_follow Skill."""
+    """为 human_follow Skill 提供持久化 NATS 数据面的服务。"""
 
     def __init__(self, config: DeploymentConfig) -> None:
         self.config = config
-        self.bus = create_bus_client(config.deployment.bus)
+        self.bus = create_bus_client(config.deployment.bus, role="human_follow")
         self.topics = Topics()
         self._stop = asyncio.Event()
         self._frames: dict[str, tuple[dict[str, Any], Any]] = {}

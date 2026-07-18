@@ -1,17 +1,29 @@
-"""Stable protocol surface shared by channels, agents, policies, and robots."""
+"""渠道、Agent、策略和机器人共用的稳定协议接口。"""
 
 from hey_robot.protocol.messages import (
+    ActionProposal,
     AgentReply,
     ArtifactRef,
+    ConversationResult,
+    ConversationTurn,
     Envelope,
+    EvidenceFact,
+    FailurePayload,
     ImageRef,
     MediaRef,
     RobotAction,
+    RobotExecutionGate,
     RobotObservation,
     RobotStatus,
+    SceneEntity,
+    SceneRelation,
+    ShortOperationCommand,
+    SkillControl,
+    SkillControlResult,
     SkillEvent,
     SkillIntent,
     SkillResult,
+    ToolOutcome,
     UserTurn,
 )
 from hey_robot.protocol.skills import (
@@ -21,19 +33,31 @@ from hey_robot.protocol.skills import (
 from hey_robot.protocol.topics import Topics
 
 __all__ = [
+    "ActionProposal",
     "AgentReply",
     "ArtifactRef",
+    "ConversationResult",
+    "ConversationTurn",
     "Envelope",
+    "EvidenceFact",
+    "FailurePayload",
     "ImageRef",
     "MediaRef",
     "RobotAction",
+    "RobotExecutionGate",
     "RobotObservation",
     "RobotSkillAction",
     "RobotSkillResult",
     "RobotStatus",
+    "SceneEntity",
+    "SceneRelation",
+    "ShortOperationCommand",
+    "SkillControl",
+    "SkillControlResult",
     "SkillEvent",
     "SkillIntent",
     "SkillResult",
+    "ToolOutcome",
     "Topics",
     "UserTurn",
 ]

@@ -6,11 +6,17 @@ deployment:
   bus:
     type: nats
     url: nats://127.0.0.1:4222
+
     options:
       robot_publish_hz: 2.0
       camera_stream_hz: 15.0
       human_follow_service_enabled: true
       robot_status_log_every_frames: 30
+
+agent_runtime:
+  enabled: true
+  robot_id: xlerobot
+  entity_catalog: [robot:xlerobot, scene]
 
 logging:
   level: INFO
@@ -111,9 +117,9 @@ channels:
     tts_echo_guard_sec: 1.0
     reply_tts: true
     recorder:
-      input_device: "sof-hda-dsp: - (hw:1,7)"  # DMIC16kHz（原生支持 16kHz）
+      input_device: "sof-hda-dsp: - (hw:1,7)"  # DMIC 16kHz 原生输入。
       sample_rate: 16000
-      channels: 2  # DMIC 为双声道，streaming_asr 会自动下混为单声道
+      channels: 2  # DMIC 为双声道，streaming_asr 会自动下混为单声道。
       block_ms: 100
       energy_threshold: 0.012
       silence_sec: 0.9
@@ -146,7 +152,7 @@ channels:
       endpoint: wss://openspeech.bytedance.com/api/v3/tts/bidirection
       encoding: pcm
       sample_rate: 16000
-      output_device: null  # 使用系统默认输出设备（PulseAudio）
+      output_device: null  # 使用系统默认输出设备（PulseAudio）。
   feishu:
     type: feishu
     enabled: true
@@ -296,7 +302,6 @@ agents:
     policy_id: embodied_skills
     settings:
       mode: autonomous
-      max_iterations: 6
       providers:
         planner:
           type: deepseek
@@ -315,19 +320,6 @@ agents:
           api_key_env: DASHSCOPE_API_KEY
           temperature: 0.0
           max_tokens: 512
-      execution_feedback:
-        backend: status
-        media_root: runtime/xlerobot.real.ubuntu/media
-      task_supervisor:
-        status_stale_sec: 90.0
-        observation_stale_sec: 90.0
-      task_safety:
-        enabled: true
-        voice_motion_requires_confirmation: true
-      perception:
-        scene_captioner:
-          enabled: true
-          purpose: scene_captioner
-      autonomy:
-        enabled: true
-        max_events: 100
+
+
+

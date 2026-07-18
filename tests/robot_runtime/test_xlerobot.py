@@ -19,7 +19,6 @@ from hey_robot.robot_runtime.so101 import SO101Driver
 from hey_robot.robot_runtime.xlerobot import XLeRobotDriver
 from hey_robot.robot_runtime.xlerobot.executor import XLeRobotSkillExecutor
 from hey_robot.robot_runtime.xlerobot.hardware.native import _service_diagnostic
-from hey_robot.skill_os import SkillPlanner
 
 
 def test_robot_manager_supports_xlerobot() -> None:
@@ -60,14 +59,6 @@ def test_robot_manager_supports_explicit_family_environment_driver_identity() ->
     from hey_robot.robot_runtime.simulation.xlerobot_sim_driver import XLeRobotSimDriver
 
     assert isinstance(driver, XLeRobotSimDriver)
-
-
-def test_skill_planner_maps_chinese_forward_motion() -> None:
-    assert SkillPlanner().plan("往前走10cm") == RobotSkillAction(
-        "move_base",
-        {"direction": "forward", "distance_cm": 10.0},
-        expected_duration_sec=1.0,
-    )
 
 
 def test_xlerobot_deployment_uses_native_skill_policy() -> None:
@@ -215,6 +206,10 @@ def test_xlerobot_executor_dispatches_atomic_motion_and_arm_skills() -> None:
             self.calls.append(("move_forward_cm", distance_cm))
             return {"success": True, "distance_cm": distance_cm}
 
+        def strafe_left_cm(self, distance_cm: float):
+            self.calls.append(("strafe_left_cm", distance_cm))
+            return {"success": True, "distance_cm": distance_cm}
+
         def turn_right_deg(self, angle_deg: float):
             self.calls.append(("turn_right_deg", angle_deg))
             return {"success": True, "angle_deg": angle_deg}
@@ -240,6 +235,9 @@ def test_xlerobot_executor_dispatches_atomic_motion_and_arm_skills() -> None:
         RobotSkillAction("move_base", {"direction": "forward", "distance_cm": 18})
     ).success
     assert executor.execute(
+        RobotSkillAction("move_base", {"direction": "left", "distance_cm": 12})
+    ).success
+    assert executor.execute(
         RobotSkillAction("turn_base", {"direction": "right", "angle_deg": 45})
     ).success
     assert executor.execute(
@@ -256,6 +254,7 @@ def test_xlerobot_executor_dispatches_atomic_motion_and_arm_skills() -> None:
 
     assert client.calls == [
         ("move_forward_cm", 18.0),
+        ("strafe_left_cm", 12.0),
         ("turn_right_deg", 45.0),
         ("set_joints_delta", {"wrist_roll": 12.0}, None),
         ("move_named_pose", "pregrasp", "left"),
@@ -306,6 +305,8 @@ async def test_xlerobot_driver_rejects_action_when_contract_readiness_fails() ->
     intent = SkillIntent(
         envelope=Envelope(robot_id="xlerobot"),
         skill_id="skill1",
+        task_id="task1",
+        intent_kind="skill",
         name="set_gripper",
         arguments={"action": "open"},
         objective="open gripper",

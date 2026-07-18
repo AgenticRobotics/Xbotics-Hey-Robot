@@ -43,6 +43,8 @@ class RobotSkillAction:
         return RobotAction(
             envelope=intent.envelope,
             skill_id=intent.skill_id,
+            task_id=intent.task_id,
+            intent_kind=intent.intent_kind,
             values=[],
             timestamp=time.time(),
             metadata={

@@ -52,7 +52,6 @@ def test_runner_builds_local_services() -> None:
     assert [service.name for service in runner.services] == [
         "robot",
         "skill-controller",
-        "task-supervisor",
         "agent:main",
         "gateway",
     ]
@@ -85,6 +84,7 @@ def test_runner_builds_services_when_configured(tmp_path) -> None:
                 }
             },
             "channels": {"web": {"type": "web", "enabled": True}},
+            "agent_runtime": {"enabled": True, "entity_catalog": ["robot:mock0"]},
         }
     )
 
@@ -92,7 +92,6 @@ def test_runner_builds_services_when_configured(tmp_path) -> None:
 
     service_names = [service.name for service in runner.services]
     assert "robot" in service_names
-    assert "task-supervisor" in service_names
     assert "agent:main" in service_names
     assert "gateway" in service_names
 
@@ -120,7 +119,13 @@ async def test_robot_runtime_wraps_driver_capabilities_health_and_observation(
     snapshot = await runtime.start()
     observation = await runtime.observe()
     intent = SkillIntent(
-        envelope=Envelope(robot_id="mock0"), skill_id="cmd1", objective="move forward"
+        envelope=Envelope(robot_id="mock0"),
+        skill_id="cmd1",
+        task_id="task",
+        intent_kind="skill",
+        name="move_base",
+        arguments={"direction": "forward", "distance_cm": 10},
+        objective="move forward",
     )
     status = await runtime.apply_action(
         RobotSkillAction(
@@ -176,7 +181,13 @@ async def test_robot_runtime_safety_blocks_estop(tmp_path) -> None:
     await runtime.start()
 
     intent = SkillIntent(
-        envelope=Envelope(robot_id="mock0"), skill_id="cmd1", objective="stop"
+        envelope=Envelope(robot_id="mock0"),
+        skill_id="cmd1",
+        task_id="task",
+        intent_kind="skill",
+        name="stop_motion",
+        arguments={},
+        objective="stop",
     )
     with pytest.raises(RobotSafetyError, match="estop"):
         await runtime.apply_action(

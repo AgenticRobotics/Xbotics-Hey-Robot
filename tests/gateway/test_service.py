@@ -84,7 +84,9 @@ def _gateway(tmp_path) -> GatewayService:
     return gateway
 
 
-def test_gateway_forwards_user_turn_and_persists_episode(tmp_path) -> None:
+def test_gateway_publishes_goal_prefixed_text_as_ordinary_turn(
+    tmp_path,
+) -> None:
     gateway = _gateway(tmp_path)
     turn = UserTurn(
         envelope=Envelope(
@@ -93,99 +95,130 @@ def test_gateway_forwards_user_turn_and_persists_episode(tmp_path) -> None:
         text="pick up the cup",
     )
 
+    gateway.episodes.ensure(
+        "ep-owner", EpisodeScope(dimensions=("user",), values={"user": "owner"}), ()
+    )
+    gateway.episodes.append_user_turn("ep-owner", turn)
     asyncio.run(gateway._on_user_turn(turn))
 
     fake_bus = cast(FakeBus, gateway.bus)
-    published_topics = [topic for topic, _payload in fake_bus.published]
-    forwarded_payload = next(
+    assert all(topic != gateway.topics.user_turn for topic, _ in fake_bus.published)
+    conversation = next(
         payload
         for topic, payload in fake_bus.published
-        if topic == gateway.topics.user_turn
+        if topic == gateway.topics.conversation_turn
     )
-    history = gateway.episodes.history(forwarded_payload["envelope"]["episode_id"])
-    stored_events = gateway.event_store.recent(10)
+    assert conversation["text"] == "pick up the cup"
+    assert conversation["session_key"] == "d1:main:web:chat-1"
 
-    assert gateway.topics.user_turn in published_topics
-    assert gateway.topics.runtime_event in published_topics
-    assert forwarded_payload["envelope"]["agent_id"] == "main"
-    assert forwarded_payload["envelope"]["robot_id"] == "mock0"
-    assert forwarded_payload["envelope"]["user_id"] is None
-    assert forwarded_payload["envelope"]["episode_id"] is not None
-    assert history[-1].role == "user"
-    assert {event["kind"] for event in stored_events} >= {"episode.allocated"}
-    interaction = gateway.interaction_states.get(
-        forwarded_payload["envelope"]["episode_id"]
+    create = UserTurn(
+        envelope=turn.envelope,
+        text="""/goal create {"objective":"inspect","success_criteria":[{"criterion_id":"seen","criterion_type":"evidence_present","subject_id":"room:front","predicate":"observed","object_id":"scene","max_age_sec":20}]}""",
     )
-    assert interaction is not None
-    assert interaction.active_channel == "web"
-    assert interaction.last_user_intent == "new_task"
+    asyncio.run(gateway._on_user_turn(create))
+    turns = [
+        payload
+        for topic, payload in fake_bus.published
+        if topic == gateway.topics.conversation_turn
+    ]
+    assert [item["text"] for item in turns] == ["pick up the cup", create.text]
+
+
+def test_gateway_never_routes_natural_language_directly_to_skill_intent(
+    tmp_path,
+) -> None:
+    gateway = _gateway(tmp_path)
+    asyncio.run(
+        gateway._on_user_turn(
+            UserTurn(Envelope(channel="web", sender_id="u1"), "look around")
+        )
+    )
+    fake_bus = cast(FakeBus, gateway.bus)
+    assert any(
+        topic == gateway.topics.conversation_turn for topic, _ in fake_bus.published
+    )
+    assert all(topic != gateway.topics.skill_intent for topic, _ in fake_bus.published)
+
+
+def test_gateway_routes_turns_even_when_task_store_has_active_task(tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+    gateway.task_store.create_task(
+        session_key="d1:main:web:u1",
+        envelope=Envelope(robot_id="mock0"),
+        objective="current task",
+    )
+
+    asyncio.run(
+        gateway._on_user_turn(
+            UserTurn(Envelope(channel="web", sender_id="u1"), "actually inspect here")
+        )
+    )
+
+    fake_bus = cast(FakeBus, gateway.bus)
+    assert any(
+        topic == gateway.topics.conversation_turn for topic, _ in fake_bus.published
+    )
+
+
+def test_gateway_deduplicates_replayed_transport_message_before_model_routing(
+    tmp_path,
+) -> None:
+    gateway = _gateway(tmp_path)
+    turn = UserTurn(
+        Envelope(channel="web", sender_id="u1", message_id="replayed-message"),
+        "look around",
+    )
+
+    asyncio.run(gateway._on_user_turn(turn))
+    asyncio.run(gateway._on_user_turn(turn))
+
+    fake_bus = cast(FakeBus, gateway.bus)
+    turns = [
+        payload
+        for topic, payload in fake_bus.published
+        if topic == gateway.topics.conversation_turn
+    ]
+    assert len(turns) == 1
+
+
+def test_gateway_routes_natural_language_emergency_stop_without_provider(
+    tmp_path,
+) -> None:
+    gateway = _gateway(tmp_path)
+
+    asyncio.run(
+        gateway._on_user_turn(
+            UserTurn(
+                Envelope(channel="web", sender_id="u1", message_id="stop-1"),
+                "emergency stop",
+            )
+        )
+    )
+
+    fake_bus = cast(FakeBus, gateway.bus)
+    commands = [
+        payload
+        for topic, payload in fake_bus.published
+        if topic == gateway.topics.skill_control
+    ]
+    assert len(commands) == 1
+    assert commands[0]["action"] == "emergency_stop"
 
 
 def test_gateway_deduplicates_own_runtime_event_echo(tmp_path) -> None:
     gateway = _gateway(tmp_path)
-    turn = UserTurn(
-        envelope=Envelope(channel="web", chat_id="chat-1", chat_type="web"),
-        text="inspect",
+    event = RuntimeEvent.make("goal.created", source="gateway", robot_id="mock0")
+    gateway.event_store.append(event)
+    asyncio.run(
+        gateway._on_runtime_event(gateway.topics.runtime_event, event.to_dict())
     )
-
-    asyncio.run(gateway._on_user_turn(turn))
-    event = next(
-        item
-        for item in gateway.event_store.recent(10)
-        if item["kind"] == EventKind.EPISODE_ALLOCATED
-    )
-    asyncio.run(gateway._on_runtime_event(gateway.topics.runtime_event, event))
 
     stored = [
         item
         for item in gateway.event_store.recent(20)
-        if item.get("event_id") == event["event_id"]
+        if item.get("event_id") == event.event_id
     ]
     assert len(stored) == 1
-
-
-def test_gateway_maps_bound_sender_to_internal_user_and_unifies_episodes(
-    tmp_path,
-) -> None:
-    gateway = _gateway(tmp_path)
-    web_turn = UserTurn(
-        envelope=Envelope(
-            channel="web",
-            account_id="web",
-            chat_id="chat-web",
-            chat_type="web",
-            sender_id="web-user",
-        ),
-        text="inspect table",
-    )
-    voice_turn = UserTurn(
-        envelope=Envelope(
-            channel="voice",
-            account_id="voice",
-            chat_id="chat-voice",
-            chat_type="voice",
-            sender_id="voice-user",
-        ),
-        text="continue",
-    )
-
-    asyncio.run(gateway._on_user_turn(web_turn))
-    asyncio.run(gateway._on_user_turn(voice_turn))
-
-    fake_bus = cast(FakeBus, gateway.bus)
-    user_turn_payloads = [
-        payload
-        for topic, payload in fake_bus.published
-        if topic == gateway.topics.user_turn
-    ]
-
-    assert len(user_turn_payloads) == 2
-    assert user_turn_payloads[0]["envelope"]["user_id"] == "owner"
-    assert user_turn_payloads[1]["envelope"]["user_id"] == "owner"
-    assert (
-        user_turn_payloads[0]["envelope"]["episode_id"]
-        == user_turn_payloads[1]["envelope"]["episode_id"]
-    )
 
 
 def test_gateway_web_history_uses_user_identity_scope(tmp_path) -> None:
@@ -222,61 +255,20 @@ def test_gateway_web_history_uses_user_identity_scope(tmp_path) -> None:
     assert history["records"][-1]["content"] == "remember this task"
 
 
-def test_gateway_web_cockpit_exposes_task_session_view(tmp_path) -> None:
+def test_gateway_web_cockpit_exposes_sustained_task_view(tmp_path) -> None:
     gateway = _gateway(tmp_path)
-    envelope = Envelope(
-        trace_id="tr1",
-        episode_id="ep1",
-        channel="web",
-        robot_id="mock0",
-        agent_id="main",
-    )
-    gateway.task_runs.ensure_active(
-        episode_id="ep1",
-        task="follow me",
-        agent_id="main",
-        robot_id="mock0",
-    )
-    gateway.task_runs.bind_skill("ep1", "skill1", "follow me")
-    gateway.skill_store.append(
-        SkillEvent(
-            envelope=envelope,
-            skill_id="skill1",
-            name="human_follow",
-            phase="executing",
-            progress=0.4,
-            summary="following target",
-            step="following",
-            metadata={
-                "ux": {
-                    "skill": "human_follow",
-                    "phase": "following",
-                    "bbox": [10, 20, 30, 40],
-                    "confidence": 0.8,
-                    "frame_id": 12,
-                    "camera": "front",
-                    "command": {"vx": 0.1, "vy": 0.0, "wz": 0.2},
-                }
-            },
-        )
+    task = gateway.task_store.create_task(
+        session_key="session",
+        envelope=Envelope(robot_id="mock0"),
+        objective="follow me",
     )
 
     payload = asyncio.run(gateway._web_cockpit("ep1"))
 
     assert payload is not None
     assert payload["health"]["robot_id"] == "mock0"
-    view = payload["view"]
-    assert view["root_task"] == "follow me"
-    assert view["active_skill_id"] == "skill1"
-    assert view["active_skill_name"] == "human_follow"
-    assert view["current_phase"] == "following"
-    assert view["skill_progress"] == 0.4
-    assert view["skill_ux"]["bbox"] == [10, 20, 30, 40]
-    assert view["latest_evidence"]["skill_ux"]["confidence"] == 0.8
-    assert view["interaction_state"] is None
-    assert any(item["kind"] == "skill_progress" for item in view["timeline"])
-    assert "stop_motion" in view["operator_actions"]
-    assert asyncio.run(gateway._web_cockpit("missing")) is None
+    assert payload["task"]["task_id"] == task.task_id
+    assert payload["task"]["objective"] == "follow me"
 
 
 def test_gateway_identity_binding_links_web_and_feishu_without_forwarding_task(
@@ -471,20 +463,19 @@ def test_gateway_publishes_runtime_and_skill_events_to_channels(tmp_path) -> Non
             gateway.topics.skill_result,
             to_payload(
                 SkillResult(
-                    envelope=skill_event.envelope, skill_id="cmd1", status="completed"
+                    envelope=skill_event.envelope,
+                    skill_id="cmd1",
+                    status="completed",
+                    success=True,
                 )
             ),
         )
     )
 
-    state = gateway.robot_states.load("ep1")
-
     assert web is not None
     assert any(item["kind"] == "robot.status" for item in web._events)  # type: ignore[attr-defined]
     assert any(item["kind"] == "skill.lifecycle" for item in web._events)  # type: ignore[attr-defined]
     assert gateway.skill_store.get("cmd1") is not None
-    assert state is not None
-    assert state.active_skill_id == "cmd1"
 
 
 def test_gateway_compacts_robot_status_motion_trace_for_event_stream(tmp_path) -> None:
@@ -498,7 +489,7 @@ def test_gateway_compacts_robot_status_motion_trace_for_event_stream(tmp_path) -
             agent_id="main",
         ),
         frame_id=7,
-        state="skill_completed",
+        state="idle",
         metrics={
             "last_skill_result": {
                 "success": True,
@@ -569,16 +560,19 @@ def test_gateway_throttles_robot_status_disk_persistence(tmp_path) -> None:
 
 def test_gateway_runtime_summary_normalizes_robot_and_event_content(tmp_path) -> None:
     gateway = _gateway(tmp_path)
-    gateway.robot_states.ensure("ep1", agent_id="main", robot_id="mock0")
-    gateway.robot_states.update_status(
-        "ep1",
-        RobotStatus(
-            envelope=Envelope(robot_id="mock0"),
-            frame_id=42,
-            state="idle",
-            success=True,
-            metrics={"battery": {"percentage": 85}},
-        ),
+    asyncio.run(
+        gateway._on_robot_status(
+            gateway.topics.robot_status,
+            to_payload(
+                RobotStatus(
+                    envelope=Envelope(robot_id="mock0"),
+                    frame_id=42,
+                    state="idle",
+                    success=True,
+                    metrics={"battery": {"percentage": 85}},
+                )
+            ),
+        )
     )
     gateway.event_store.append(
         RuntimeEvent.make(
@@ -653,6 +647,7 @@ def test_gateway_start_and_stop_publish_lifecycle_and_manage_channels(
     ]
     assert fake_bus.subscriptions == [
         [gateway.topics.agent_reply],
+        [gateway.topics.conversation_result],
         [gateway.topics.runtime_event],
         [gateway.topics.robot_status],
         [gateway.topics.skill_event],
@@ -666,3 +661,22 @@ def test_gateway_start_and_stop_publish_lifecycle_and_manage_channels(
     assert fake_channels.stopped is True
     assert fake_bus.closed is True
     assert any(event["kind"] == "gateway.shutdown" for event in stopped)
+
+
+def test_gateway_routes_natural_confirmation_to_agent(tmp_path) -> None:
+    gateway = _gateway(tmp_path)
+    asyncio.run(
+        gateway._on_user_turn(
+            UserTurn(
+                Envelope(channel="web", sender_id="web-user", message_id="confirm-msg"),
+                "confirm",
+            )
+        )
+    )
+    fake_bus = cast(FakeBus, gateway.bus)
+    confirmations = [
+        payload
+        for topic, payload in fake_bus.published
+        if topic == gateway.topics.conversation_turn and payload["text"] == "confirm"
+    ]
+    assert len(confirmations) == 1

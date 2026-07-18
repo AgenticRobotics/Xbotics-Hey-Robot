@@ -28,7 +28,7 @@ class ActionBufferEntry:
 
 
 class RobotControlPlane:
-    """Runtime-side control boundary for typed policy outputs and primitives."""
+    """运行时侧的控制边界，接收带类型的策略输出和原语。"""
 
     def __init__(self, *, max_buffer_size: int = 32) -> None:
         self.max_buffer_size = max(1, int(max_buffer_size))
@@ -351,6 +351,8 @@ class RobotControlPlane:
         return RobotAction(
             envelope=intent.envelope,
             skill_id=intent.skill_id,
+            task_id=intent.task_id,
+            intent_kind=intent.intent_kind,
             values=numeric_values,
             metadata={
                 **_policy_metadata(policy_result),
@@ -377,7 +379,10 @@ def _intent_like(action: RobotAction) -> SkillIntent:
     return SkillIntent(
         envelope=action.envelope,
         skill_id=action.skill_id,
+        task_id=action.task_id,
+        intent_kind=action.intent_kind,
         name="stop_motion",
+        arguments={},
         objective="preempt active control output",
     )
 

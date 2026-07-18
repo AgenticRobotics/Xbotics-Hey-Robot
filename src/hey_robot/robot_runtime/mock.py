@@ -25,7 +25,7 @@ from hey_robot.robot_runtime.observations import DriverObservation, ObservationA
 
 
 class MockRobotDriver:
-    """Deterministic xlerobot simulator for system validation without hardware."""
+    """用于无硬件系统验证的确定性 XLeRobot 模拟器。"""
 
     _JOINT_LIMITS: ClassVar[dict[str, tuple[float, float]]] = {
         "shoulder_pan": (-180.0, 180.0),
@@ -253,7 +253,7 @@ class MockRobotDriver:
         return RobotStatus(
             envelope=self._envelope(),
             frame_id=self.frame_id,
-            state=self.state,
+            state=self.state,  # type: ignore[arg-type]
             success=None,
             error=self.last_error,
             metrics=self._metrics(),
@@ -431,9 +431,14 @@ class MockRobotDriver:
             return self._ok(skill, "base stopped")
         if name == "move_base":
             distance = float(args["distance_cm"])
-            if str(args.get("direction", "forward")).lower() == "backward":
-                distance = -abs(distance)
-            return self._move(skill, distance, 0.0)
+            direction = str(args.get("direction", "forward")).lower()
+            if direction == "backward":
+                return self._move(skill, -abs(distance), 0.0)
+            if direction == "left":
+                return self._move(skill, 0.0, abs(distance))
+            if direction == "right":
+                return self._move(skill, 0.0, -abs(distance))
+            return self._move(skill, abs(distance), 0.0)
         if name == "turn_base":
             angle = float(args["angle_deg"])
             if str(args.get("direction", "left")).lower() == "right":
@@ -1097,7 +1102,7 @@ class MockRobotDriver:
         return RobotStatus(
             envelope=self._envelope(trace_id=action.envelope.trace_id),
             frame_id=self.frame_id,
-            state=self.state,
+            state=self.state,  # type: ignore[arg-type]
             skill_id=action.skill_id,
             success=success,
             error=None if success else self.last_error,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
@@ -21,7 +22,7 @@ VoiceTextHandler = Callable[[str, dict], Awaitable[None]]
 
 
 class VoiceInteractionLoop:
-    """Local microphone -> ASR -> text handler, plus optional reply TTS."""
+    """本地麦克风 → ASR → 文本处理器，并可选播报回复 TTS。"""
 
     def __init__(self, config: VoiceAudioConfig) -> None:
         self.config = config
@@ -142,13 +143,20 @@ class VoiceInteractionLoop:
                     text,
                     {
                         **self.config.metadata,
-                        "voice": _route_metadata(decision),
+                        "voice": {
+                            **_route_metadata(decision),
+                            # 这里标识的是一次捕获到的语音，而不是语音文本本身。
+                            # Gateway 用它作为持久 receipt key，因此两次相同口令仍是两条命令，
+                            # 但传输重试不会被重复处理。
+                            "utterance_id": str(uuid.uuid4()),
+                        },
                         "audio": {
                             "duration_sec": utterance.duration_sec,
                             "sample_rate": utterance.sample_rate,
                             "channels": utterance.channels,
                             "peak": utterance.peak,
                             "rms": utterance.rms,
+                            "asr_confidence": getattr(utterance, "confidence", None),
                         },
                     },
                 )
@@ -196,7 +204,10 @@ class VoiceInteractionLoop:
                         decision.text,
                         {
                             **self.config.metadata,
-                            "voice": _route_metadata(decision),
+                            "voice": {
+                                **_route_metadata(decision),
+                                "utterance_id": str(uuid.uuid4()),
+                            },
                             "audio": {
                                 "source": "scripted",
                                 "sample_rate": self.config.recorder.sample_rate,

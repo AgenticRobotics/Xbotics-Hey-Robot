@@ -8,6 +8,8 @@ from hey_robot.protocol import (
     RobotObservation,
     RobotSkillAction,
     RobotStatus,
+    SceneEntity,
+    SceneRelation,
     SkillIntent,
 )
 from hey_robot.robot_runtime import RobotManager, RobotRuntime
@@ -15,6 +17,20 @@ from hey_robot.robot_runtime.base import RobotCapabilities, RobotHealth
 from hey_robot.robot_runtime.media import LocalMediaStore
 from hey_robot.robot_runtime.observations import DriverObservation, ObservationAsset
 from hey_robot.robot_runtime.service import RobotService
+
+
+def _intent(skill_id: str, name: str, objective: str) -> SkillIntent:
+    return SkillIntent(
+        envelope=Envelope(robot_id="mock0"),
+        skill_id=skill_id,
+        task_id="task-test",
+        intent_kind="observation"
+        if name in {"inspect_scene", "look_around", "detect_marker"}
+        else "skill",
+        name=name,
+        arguments={},
+        objective=objective,
+    )
 
 
 async def test_robot_runtime_observation_uses_pipeline(tmp_path) -> None:
@@ -58,9 +74,7 @@ async def test_robot_runtime_handles_perception_skill_without_driver_action(
         RobotManager(config).require("mock0"), LocalMediaStore(tmp_path)
     )
     await runtime.start()
-    skill = SkillIntent(
-        envelope=Envelope(robot_id="mock0"), skill_id="cmd1", objective="look ahead"
-    )
+    skill = _intent("cmd1", "inspect_scene", "look ahead")
     action = RobotSkillAction("inspect_scene", safety_level="observe").to_robot_action(
         skill
     )
@@ -82,9 +96,7 @@ async def test_robot_runtime_routes_motion_through_control_plane(tmp_path) -> No
         RobotManager(config).require("mock0"), LocalMediaStore(tmp_path)
     )
     await runtime.start()
-    intent = SkillIntent(
-        envelope=Envelope(robot_id="mock0"), skill_id="move1", objective="move forward"
-    )
+    intent = _intent("move1", "move_base", "move forward")
     action = RobotSkillAction(
         "move_base", {"direction": "forward", "distance_cm": 10}
     ).to_robot_action(intent)
@@ -117,9 +129,7 @@ async def test_robot_runtime_perception_skill_refreshes_camera_directly(
     driver = _CountingCameraDriver("mock0")
     runtime = RobotRuntime(driver, LocalMediaStore(tmp_path / "media"))
     await runtime.start()
-    skill = SkillIntent(
-        envelope=Envelope(robot_id="mock0"), skill_id="scan1", objective="look"
-    )
+    skill = _intent("scan1", "inspect_scene", "look")
     action = RobotSkillAction("inspect_scene", safety_level="observe").to_robot_action(
         skill
     )
@@ -129,6 +139,62 @@ async def test_robot_runtime_perception_skill_refreshes_camera_directly(
     assert status.success is True
     assert driver.observe_count >= 1
     assert status.metrics["last_skill_result"]["skill"] == "inspect_scene"
+
+
+async def test_robot_runtime_uses_scene_captioner_for_inspect_scene(tmp_path) -> None:
+    captioner = _FakeSceneCaptioner()
+    runtime = RobotRuntime(
+        _CountingCameraDriver("mock0"),
+        LocalMediaStore(tmp_path / "media"),
+        scene_captioner=captioner,
+    )
+    await runtime.start()
+    action = RobotSkillAction("inspect_scene", safety_level="observe").to_robot_action(
+        _intent("caption1", "inspect_scene", "describe scene")
+    )
+
+    status = await runtime.apply_action(action)
+
+    result = status.metrics["last_skill_result"]
+    assert result["semantic_available"] is True
+    assert result["summary"] == "scene=mug on table"
+    assert captioner.observations[0].images
+
+
+async def test_inspect_scene_publishes_frame_scoped_entities(tmp_path) -> None:
+    class Captioner:
+        async def caption(self, observation, _status):
+            from hey_robot.cognition.perception.scene import SceneUnderstanding
+
+            return SceneUnderstanding(
+                summary="passage visible",
+                entities=[
+                    SceneEntity(
+                        "passage:1",
+                        "passage",
+                        observation.frame_id,
+                        {"bearing": "front_right"},
+                        [SceneRelation("leads_to", "room:kitchen")],
+                    )
+                ],
+                confidence=0.9,
+            )
+
+    runtime = RobotRuntime(
+        _CountingCameraDriver("mock0"),
+        LocalMediaStore(tmp_path / "media"),
+        scene_captioner=Captioner(),
+    )
+    await runtime.start()
+    action = RobotSkillAction("inspect_scene", safety_level="observe").to_robot_action(
+        _intent("entities1", "inspect_scene", "inspect doorway")
+    )
+
+    await runtime.apply_action(action)
+    observation = await runtime.observe()
+
+    assert observation.entities[0].entity_id == "passage:1"
+    assert observation.entities[0].relations[0].object_id == "room:kitchen"
 
 
 async def test_robot_runtime_status_returns_driver_status_directly(tmp_path) -> None:
@@ -174,7 +240,7 @@ async def test_robot_runtime_detect_marker_with_square_fallback(tmp_path) -> Non
     )
     await runtime.start()
     action = RobotSkillAction("detect_marker").to_robot_action(
-        SkillIntent(envelope=Envelope(robot_id="mock0"), skill_id="marker1")
+        _intent("marker1", "detect_marker", "detect marker")
     )
 
     status = await runtime.apply_action(action)
@@ -190,7 +256,7 @@ async def test_robot_runtime_look_around_collects_multiple_observations(
     runtime = RobotRuntime(driver, LocalMediaStore(tmp_path))
     await runtime.start()
     action = RobotSkillAction("look_around").to_robot_action(
-        SkillIntent(envelope=Envelope(robot_id="mock0"), skill_id="look1")
+        _intent("look1", "look_around", "look around")
     )
 
     status = await runtime.apply_action(action)
@@ -317,3 +383,14 @@ class _SquareMarkerDriver(_CountingCameraDriver):
                 )
             ],
         )
+
+
+class _FakeSceneCaptioner:
+    def __init__(self) -> None:
+        self.observations: list[RobotObservation] = []
+
+    async def caption(self, observation, _status):
+        from hey_robot.cognition.perception.scene import SceneUnderstanding
+
+        self.observations.append(observation)
+        return SceneUnderstanding(summary="mug on table", confidence=0.9)

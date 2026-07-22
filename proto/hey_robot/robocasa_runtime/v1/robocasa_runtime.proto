@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package hey_robot.robocasa_runtime.v1;
+
+import "google/protobuf/struct.proto";
+
+service RoboCasaRuntime {
+  rpc GetHealth(HealthRequest) returns (HealthResponse);
+  rpc BeginTrial(BeginTrialRequest) returns (ObservationResponse);
+  rpc Observe(EmptyRequest) returns (ObservationResponse);
+  rpc Step(StepRequest) returns (StepResponse);
+  rpc ReadTruth(EmptyRequest) returns (TruthResponse);
+  rpc EndTrial(EndTrialRequest) returns (EndTrialResponse);
+}
+
+message HealthRequest {}
+message EmptyRequest {}
+
+message HealthResponse {
+  bool online = 1;
+  bool loaded = 2;
+  bool busy = 3;
+  string error_message = 4;
+  google.protobuf.Struct metrics = 5;
+}
+
+message BeginTrialRequest {
+  string trial_id = 1;
+  string task = 2;
+  int64 seed = 3;
+  string split = 4;
+  repeated string registries = 5;
+}
+
+message ImageFrame {
+  string camera = 1;
+  bytes data = 2;
+  string content_type = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+}
+
+message ObservationResponse {
+  string trial_id = 1;
+  int64 frame_id = 2;
+  repeated float state = 3;
+  repeated ImageFrame images = 4;
+  string task = 5;
+  bool done = 6;
+  reserved 7;
+  reserved "success";
+  google.protobuf.Struct metadata = 8;
+}
+
+message StepRequest {
+  repeated float action = 1;
+  int64 expected_frame_id = 2;
+  repeated float raw_action = 3;
+  bool action_clipped = 4;
+}
+
+message StepResponse {
+  ObservationResponse observation = 1;
+  double reward = 2;
+  bool done = 3;
+  reserved 4;
+  reserved "success";
+  google.protobuf.Struct metrics = 5;
+}
+
+message TruthResponse {
+  bool done = 1;
+  bool official_success = 2;
+  int64 frame_id = 3;
+  google.protobuf.Struct metrics = 4;
+}
+
+message EndTrialRequest { string reason = 1; }
+message EndTrialResponse { bool ended = 1; }

@@ -6,6 +6,8 @@ from hey_robot.protocol import ActionProposal, Envelope, ShortOperationCommand, 
 from hey_robot.protocol.messages import to_payload
 from hey_robot.skill_os.controller import (
     SkillControllerService,
+    _model_trace_arguments,
+    _orchestration_result_metadata,
     _short_operation_intent,
 )
 
@@ -32,6 +34,44 @@ def test_short_operation_maps_to_skill_intent() -> None:
     assert intent.arguments == {"direction": "forward", "distance_cm": 20}
     assert intent.objective == "move forward"
     assert intent.timeout_sec == 12.0
+
+
+def test_orchestration_metadata_is_selected_without_large_worker_payloads() -> None:
+    metadata = _orchestration_result_metadata(
+        {
+            "metrics": {
+                "option_state": "boundary_reached",
+                "root_task_success": False,
+                "requires_reobservation": True,
+                "trace": [{"action": [0.1, 0.2]}],
+            },
+            "vla": {"large": "model output"},
+        }
+    )
+
+    assert metadata == {
+        "option_state": "boundary_reached",
+        "root_task_success": False,
+        "requires_reobservation": True,
+    }
+
+
+def test_model_trace_arguments_drop_binary_observation_payloads() -> None:
+    traced = _model_trace_arguments(
+        {
+            "option_command": "close the fridge",
+            "observation": {
+                "frame_id": 12,
+                "images": [{"data": "a" * 10_000}],
+            },
+            "image_path": "/large/image.png",
+        }
+    )
+
+    assert traced == {
+        "option_command": "close the fridge",
+        "observation_frame_id": 12,
+    }
 
 
 @pytest.mark.asyncio

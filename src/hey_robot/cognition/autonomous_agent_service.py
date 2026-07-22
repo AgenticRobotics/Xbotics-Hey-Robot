@@ -101,6 +101,7 @@ class AutonomousAgentService:
             self.topics,
             catalog,
             self.conversations,
+            timeout_sec=config.agent_runtime.skill_result_timeout_sec,
         )
         self._session_locks: dict[str, asyncio.Lock] = {}
 
@@ -265,7 +266,11 @@ class AutonomousAgentService:
                     deadline_at=time.time()
                     + self.config.agent_runtime.hard_max_wall_time_sec,
                 )
-            outcome = await self.execution.execute(proposal, envelope, session_key)
+            outcome = self._duplicate_observation_gate(current_task, proposal)
+            if outcome is None:
+                outcome = self._reobservation_gate(current_task, proposal)
+            if outcome is None:
+                outcome = await self.execution.execute(proposal, envelope, session_key)
             step = self.tasks.add_step(current_task.task_id, proposal, outcome)
             call = decision.tool_calls[0]
             messages.extend(
@@ -315,6 +320,58 @@ class AutonomousAgentService:
         if isinstance(proposal, ControlTaskProposal):
             return _StepOutcome(self._control_task(proposal, session_key))
         return _StepOutcome("这次请求没有完成：工具没有产生有效的机器人提案。")
+
+    def _reobservation_gate(
+        self, task: AgentTask, proposal: ActionProposal
+    ) -> ToolOutcome | None:
+        if proposal.intent_kind == "observation":
+            return None
+        recent = self.tasks.recent_steps(task.task_id, limit=1)
+        if not recent:
+            return None
+        previous = recent[-1]
+        if previous.proposal.intent_kind == "observation" or not bool(
+            previous.outcome.data.get("requires_reobservation", False)
+        ):
+            return None
+        return ToolOutcome(
+            "failed",
+            "上一个 bounded option 要求动作后重新观察；下一步必须先调用 request_observation。",
+            data={"failure_mode": "reobservation_required"},
+            retryable=True,
+        )
+
+    def _duplicate_observation_gate(
+        self, task: AgentTask, proposal: ActionProposal
+    ) -> ToolOutcome | None:
+        """Stop repeated captioning of one unchanged camera frame."""
+        if proposal.intent_kind != "observation":
+            return None
+        completed_frames: list[int] = []
+        for step in reversed(self.tasks.recent_steps(task.task_id, limit=8)):
+            if step.proposal.intent_kind != "observation":
+                break
+            if step.outcome.status != "completed":
+                continue
+            frame_id = step.outcome.data.get("frame_id")
+            if isinstance(frame_id, int):
+                completed_frames.append(frame_id)
+            if len(completed_frames) >= 2:
+                break
+        if len(completed_frames) < 2 or completed_frames[0] != completed_frames[1]:
+            return None
+        return ToolOutcome(
+            "failed",
+            (
+                f"当前 frame={completed_frames[0]} 已连续分析两次，继续观察不会产生"
+                "新的空间证据；请选择一个有界操作子目标，或说明真实的安全阻塞。"
+            ),
+            data={
+                "failure_mode": "duplicate_observation",
+                "frame_id": completed_frames[0],
+            },
+            retryable=True,
+        )
 
     async def _complete_task(
         self, proposal: CompleteTaskProposal, session_key: str
@@ -474,6 +531,12 @@ def _tool_outcome_context(
         context += (
             f"\nactive_task id={task.task_id}; objective={task.objective}; "
             "继续根据真实工具结果推进；只有 complete_task 或 control_task 才能结束任务。"
+        )
+    if bool(outcome.data.get("requires_reobservation", False)):
+        context += (
+            "\n该 bounded option 已交还控制权，并明确要求动作后重新观察。"
+            "下一次物理 Skill 前先调用 request_observation；不能仅凭动作调用成功推断"
+            "物理世界或完整任务已经成功。"
         )
     if proposal.intent_kind == "observation":
         return (

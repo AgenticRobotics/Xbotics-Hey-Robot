@@ -1,0 +1,43 @@
+# RoboCasa365 uses an isolated uv dependency group while running the same Hey
+# Robot backend, standard ModelService, and Robot Runtime implementation.
+ARG LEROBOT_BASE_IMAGE=python:3.12-bookworm
+FROM ${LEROBOT_BASE_IMAGE}
+
+ARG IMAGE_REVISION=unknown
+
+LABEL org.opencontainers.image.title="hey-robot-robocasa365" \
+      org.opencontainers.image.revision="${IMAGE_REVISION}" \
+      org.opencontainers.image.description="Hey Robot RoboCasa365 backend"
+
+ENV MUJOCO_GL=egl \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/cache/huggingface \
+    ROBOCASA_ASSET_ROOT=/root/.robocasa \
+    PATH=/opt/bridge/.venv/bin:${PATH}
+
+WORKDIR /opt/bridge
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        git \
+        libegl1 \
+        libgl1 \
+        libgles2 \
+        libglvnd0 \
+        libopengl0 \
+        libx11-6 \
+        libxcb1 \
+        libxext6 \
+        libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --no-cache-dir --upgrade pip uv
+COPY pyproject.toml uv.lock README.md /opt/bridge/
+RUN uv sync --frozen --only-group robocasa365 --no-install-project
+
+COPY src/hey_robot /opt/bridge/hey_robot
+COPY configs/evaluation/robocasa365.agent.yaml /opt/bridge/configs/robocasa365.agent.yaml
+RUN mkdir -p /outputs /cache/huggingface
+
+EXPOSE 9092
+CMD ["python", "-m", "hey_robot.app.robocasa_backend", "--config", "/opt/bridge/configs/robocasa365.agent.yaml", "--host", "0.0.0.0", "--port", "9092"]

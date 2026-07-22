@@ -1,0 +1,130 @@
+# Host-side configuration for RoboCasa365 embodied-agent evaluation.
+# The managed backend on :9092 exposes ModelService v1 and RoboCasaRuntime gRPC.
+deployment:
+  id: robocasa365.agent
+  bus:
+    type: in_memory
+    url: memory://robocasa365.agent
+
+resources:
+  runtime_dir: runtime/robocasa365.agent
+  media:
+    root: runtime/robocasa365.agent/media
+    max_items: 10000
+    image_save_every_n: 1
+  episodes:
+    root: runtime/robocasa365.agent/episodes
+  events:
+    retain: 10000
+
+identity:
+  enabled: true
+  # Every benchmark trial carries a unique chat_id/trial_id and must not resume
+  # an active task left by an earlier seed or failed process.
+  unified_user_episodes: false
+  bindings:
+    "web:sender:robocasa365-benchmark": owner
+
+# RoboCasa365 horizons are task-specific and reach 2900 environment steps. A
+# short PI052 option plus its re-observation can consume two Agent steps, so the
+# generic 24-skill default is not a valid long-horizon evaluation budget.
+agent_runtime:
+  enabled: true
+  robot_id: robocasa365
+  hard_max_wall_time_sec: 7200
+  hard_max_continuations: 40
+  hard_max_skills: 220
+  # Includes the one-time 4-5 minute PI0.5 cold load.
+  skill_result_timeout_sec: 1800
+
+channels:
+  web:
+    type: web
+    enabled: true
+    account_id: robocasa365-web
+    host: 127.0.0.1
+    port: 18080
+    sender_id: robocasa365-benchmark
+    chat_id: robocasa365-benchmark
+    access_log: false
+    uvicorn_log_level: warning
+
+skills:
+  modules:
+    - hey_robot.skill_os.builtins
+  enabled:
+    - inspect_scene
+    - manipulate
+
+robots:
+  robocasa365:
+    type: robocasa
+    family: robocasa
+    environment: remote
+    driver: grpc
+    embodiment_profile: robocasa_remote
+    settings:
+      target: grpc://127.0.0.1:9092
+      managed_backend: true
+      backend_python: .robocasa365-venv/bin/python
+      backend_startup_timeout_sec: 60
+      timeout_sec: 60
+      control_hz: 20
+      supported_driver_primitives: [inspect_scene]
+      default_task: CloseFridge
+      default_seed: 1000
+      task_split: target
+      object_registries: [lightwheel]
+      mujoco_gl: egl
+      mujoco_device: auto_separate
+
+model_services:
+  robocasa365:
+    type: robocasa_lerobot_policy
+    robot_id: robocasa365
+    enabled: true
+    target: grpc://127.0.0.1:9092
+    provides:
+      - manipulate
+    timeout_sec: 1800
+    settings:
+      health_timeout_sec: 10
+      auth_token_env: ROBOCASA_DATA_TOKEN
+      policy_path: lerobot/pi052_robocasa
+      policy_device: cuda
+      # PI052's subtask_mem checkpoint generates and retains its own low-level
+      # subtask state from the canonical RoboCasa root instruction.
+      prompt_mode: environment_root
+      option_horizon: 50
+      load_timeout_sec: 600
+      request_timeout_sec: 300
+      offline: true
+
+policies:
+  embodied_skills:
+    enabled: true
+    robot_id: robocasa365
+    freq_hz: 1.0
+
+agents:
+  main:
+    enabled: true
+    robot_id: robocasa365
+    policy_id: embodied_skills
+    settings:
+      mode: autonomous
+      providers:
+        planner:
+          type: deepseek
+          model_env: DEEPSEEK_MODEL
+          api_key_env: DEEPSEEK_API_KEY
+          base_url_env: DEEPSEEK_BASE_URL
+          temperature: 0.0
+          max_tokens: 2048
+        scene_captioner:
+          type: dashscope
+          model_env: DASHSCOPE_MODEL
+          api_key_env: DASHSCOPE_API_KEY
+          base_url_env: DASHSCOPE_BASE_URL
+          temperature: 0.0
+          max_tokens: 1024

@@ -44,7 +44,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ${HEY_ROBOT_VLA_GPU:-0}
+              device_ids: ["${HEY_ROBOT_VLA_GPU:-0}"]
               capabilities: [gpu]
     restart: unless-stopped
     profiles:
@@ -79,11 +79,49 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ${HEY_ROBOT_VLN_GPU:-1}
+              device_ids: ["${HEY_ROBOT_VLN_GPU:-1}"]
               capabilities: [gpu]
     restart: unless-stopped
     profiles:
       - gpu
+
+  robocasa365:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.robocasa365
+      args:
+        # Resolve this to an immutable digest before a reproducible benchmark.
+        LEROBOT_BASE_IMAGE: ${HEY_ROBOT_ROBOCASA_BASE_IMAGE:-python:3.12-bookworm}
+        IMAGE_REVISION: ${HEY_ROBOT_ROBOCASA_IMAGE_REVISION:-unknown}
+    image: ${HEY_ROBOT_ROBOCASA_IMAGE:-hey-robot-robocasa365:latest}
+    environment:
+      MUJOCO_GL: egl
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
+      ROBOCASA_EVALUATOR_TOKEN: ${ROBOCASA_EVALUATOR_TOKEN:?set an evaluator control-plane token}
+      ROBOCASA_DATA_TOKEN: ${ROBOCASA_DATA_TOKEN:?set a Robot Runtime data-plane token}
+      HF_HOME: /cache/huggingface
+      HF_TOKEN: ${HF_TOKEN:-}
+      ROBOCASA_ASSET_ROOT: /root/.robocasa
+      ROBOCASA_MODEL_ASSET_ROOT: /opt/bridge/.venv/lib/python3.12/site-packages/robocasa/models/assets
+      ROBOCASA_ASSET_READY_FILE: /opt/bridge/.venv/lib/python3.12/site-packages/robocasa/models/assets/.robocasa-assets-ready
+    volumes:
+      - ${HF_CACHE_DIR:-/home/liber/.cache/huggingface}:/cache/huggingface
+      # RoboCasa creates derived MJCF XML next to object assets during environment reset.
+      - ./artifacts/robocasa365/merged-assets:/opt/bridge/.venv/lib/python3.12/site-packages/robocasa/models/assets
+      - ./runtime/robocasa365:/outputs
+    ports:
+      - "${HEY_ROBOT_ROBOCASA_PORT:-9092}:9092"
+    shm_size: "8gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    profiles:
+      - robocasa
 
   runtime:
     build:

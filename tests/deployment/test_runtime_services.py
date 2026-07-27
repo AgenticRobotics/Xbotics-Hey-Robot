@@ -7,8 +7,10 @@ from hey_robot.channels import ChannelContext, WebChannel
 from hey_robot.config import ChannelSpec, DeploymentConfig
 from hey_robot.events import EventKind, RuntimeEvent
 from hey_robot.protocol import Envelope, RobotAction, RobotSkillAction, SkillIntent
-from hey_robot.robot_runtime import RobotManager, RobotRuntime, RobotSafetyError
-from hey_robot.robot_runtime.media import LocalMediaStore
+from hey_robot.robot_media import LocalMediaStore
+from hey_robot.robot_runtime.manager import RobotManager
+from hey_robot.robot_runtime.runtime import RobotRuntime
+from hey_robot.robot_runtime.safety import RobotSafetyError
 
 
 def test_runtime_event_roundtrip_and_filter() -> None:
@@ -51,7 +53,7 @@ def test_runner_builds_local_services() -> None:
 
     assert [service.name for service in runner.services] == [
         "robot",
-        "skill-controller",
+        "skills",
         "agent:main",
         "gateway",
     ]
@@ -72,19 +74,18 @@ def test_runner_builds_services_when_configured(tmp_path) -> None:
                     "type": "robot_agent",
                     "robot_id": "mock0",
                     "settings": {
-                        "providers": {
+                        "models": {
                             "planner": {
-                                "type": "openai_compat",
                                 "model": "mock-planner",
                                 "api_key": "test-key",
-                                "api_base": "http://127.0.0.1:9/v1",
+                                "base_url": "http://127.0.0.1:9/v1",
                             }
                         }
                     },
                 }
             },
             "channels": {"web": {"type": "web", "enabled": True}},
-            "agent_runtime": {"enabled": True, "entity_catalog": ["robot:mock0"]},
+            "agent_runtime": {"enabled": True},
         }
     )
 

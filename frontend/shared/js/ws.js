@@ -64,7 +64,7 @@ const WS = (() => {
         metadata.images = payload.media;
       }
       if (text) {
-        addMessage({ role: 'agent', content: text, timestamp: Date.now(), metadata });
+        upsertAgentReply(payload, text, metadata);
       }
     } else if (type === 'runtime.event') {
       handleRuntimeEvent(data.payload || {});
@@ -89,7 +89,10 @@ const WS = (() => {
     // Skill lifecycle
     if (kind === 'skill.lifecycle' || kind === 'SKILL_LIFECYCLE') {
       const data = payload.payload || payload;
-      handleSkillLifecycle(data);
+      handleSkillLifecycle({
+        ...data,
+        traceId: payload.trace_id || data.trace_id || '',
+      });
     }
   }
 
@@ -153,6 +156,7 @@ const WS = (() => {
       Store.update('task', {
         active: true,
         skillId,
+        traceId: data.traceId || '',
         name: data.name || data.skill || '',
         phase,
         summary: data.summary || '',
@@ -163,6 +167,8 @@ const WS = (() => {
       Store.update('task', {
         active: false,
         skillId,
+        traceId: data.traceId || '',
+        name: data.name || data.skill || '',
         phase: 'completed',
         summary: data.summary || '任务完成',
         progress: 1,
@@ -172,6 +178,8 @@ const WS = (() => {
       Store.update('task', {
         active: false,
         skillId,
+        traceId: data.traceId || '',
+        name: data.name || data.skill || '',
         phase: 'failed',
         summary: data.error || data.summary || '任务失败',
         progress: data.progress || 0,
@@ -192,6 +200,46 @@ const WS = (() => {
   function addMessage(msg) {
     const conv = Store.get('conversation');
     const updated = [...conv, msg];
+    Store.set('conversation', updated);
+  }
+
+  function upsertAgentReply(payload, text, metadata) {
+    const envelope = payload.envelope || {};
+    const streamKey = metadata.interaction_id || envelope.trace_id || null;
+    const traceKey = envelope.trace_id || null;
+    const final = payload.final !== false;
+    if (!streamKey) {
+      addMessage({
+        role: 'agent',
+        content: text,
+        timestamp: Date.now(),
+        metadata,
+        traceKey,
+      });
+      return;
+    }
+    const conv = Store.get('conversation');
+    const index = conv.findIndex(msg => msg.streamKey === streamKey);
+    if (index < 0) {
+      Store.set('conversation', [...conv, {
+        role: 'agent',
+        content: text,
+        timestamp: Date.now(),
+        metadata,
+        streamKey,
+        traceKey,
+        final,
+      }]);
+      return;
+    }
+    const updated = [...conv];
+    const current = updated[index];
+    updated[index] = {
+      ...current,
+      content: final ? text : current.content + text,
+      metadata,
+      final,
+    };
     Store.set('conversation', updated);
   }
 

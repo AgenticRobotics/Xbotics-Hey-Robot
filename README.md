@@ -1,204 +1,240 @@
 <div align="center">
 
-  <pre>
+<pre>
   ██╗  ██╗██████╗  ██████╗ ████████╗██╗ ██████╗███████╗
   ╚██╗██╔╝██╔══██╗██╔═══██╗╚══██╔══╝██║██╔════╝██╔════╝
    ╚███╔╝ ██████╔╝██║   ██║   ██║   ██║██║     ███████╗
    ██╔██╗ ██╔══██╗██║   ██║   ██║   ██║██║     ╚════██║
   ██╔╝ ██╗██████╔╝╚██████╔╝   ██║   ██║╚██████╗███████║
-  ╚═╝  ╚═╝╚═════╝  ╚═════╝    ╚═╝   ╚═╝ ╚═════╝╚══════╝
-  </pre>
+  ╚═╝  ╚═╝╚═════╝  ╚═════╝    ╚═╝   ╚═╝╚═════╝╚══════╝
+</pre>
 
-  # Hey Robot
+<img src="docs/images/hey-robot-icon.png" alt="Hey Robot project icon" width="300" />
 
-  <p>
-    <em>面向真实机器人的 Embodied Agent Harness · 异步快慢双系统 · 分层解耦的具身智能架构</em>
-  </p>
+<h1>Hey Robot</h1>
 
-  <p>
-    <a href="#features">核心能力</a> ·
-    <a href="#architecture">系统架构</a> ·
-    <a href="#quick-start">快速开始</a> ·
-    <a href="#real-robot">真机部署</a> ·
-    <a href="#documentation">项目文档</a> ·
-    <a href="docs/README_EN.md">English</a>
-  </p>
+<p><em>Embodied Agent Harness · Fast–Slow Dual System · Distributed Model Services</em></p>
 
-  <p>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-0052cc?style=for-the-badge&labelColor=1a1a2e" alt="MIT License"></a>
-    <a href="https://github.com/Xbotics-Embodied-AI-club/Xbotics-Hey-Robot"><img src="https://img.shields.io/badge/Community-Xbotics-4ecdc4?style=for-the-badge&labelColor=1a1a2e" alt="Xbotics Community"></a>
-    <img src="https://img.shields.io/badge/Python-3.12-ffb703?style=for-the-badge&labelColor=1a1a2e" alt="Python 3.12">
-    <img src="https://img.shields.io/badge/Status-Active_Development-ff6b6b?style=for-the-badge&labelColor=1a1a2e" alt="Active Development">
-  </p>
+<p>
+  <a href="https://github.com/Xbotics-Embodied-AI-club/Xbotics-Hey-Robot">GitHub</a> ·
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#community">Community</a> ·
+  <a href="docs/README_ZH.md">简体中文</a>
+</p>
+
+<p>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-0b7285?style=flat-square" alt="MIT License" /></a>
+  <img src="https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12" />
+  <img src="https://img.shields.io/badge/Harness-Embodied_Agent-6f42c1?style=flat-square" alt="Embodied Agent Harness" />
+  <img src="https://img.shields.io/badge/Embodiment-XLeRobot-f59f00?style=flat-square" alt="XLeRobot" />
+  <img src="https://img.shields.io/badge/Status-Active_Development-e8590c?style=flat-square" alt="Active Development" />
+</p>
 
 </div>
 
----
+<br />
 
-Hey Robot 是一个不依赖通用 LLM Agent 框架、面向真实机器人构建的
-**Embodied Agent Harness**。
+An open-source Embodied Agent Harness for interactive long-horizon robot tasks.
 
-系统采用异步快慢双系统和分层解耦架构。Agent Loop 驱动模型推理与 Tool 使用；
-机器人能力不直接作为 Tool 暴露，而是通过统一入口请求 Skill，并根据执行反馈持续推进任务。
-Skill 能力将以 VLA、VLN 等具身模型为主要方向，通过 Robot Runtime 作用于仿真或真机。
+Hey Robot separates a robot Agent into two systems with explicit boundaries:
 
-当前以 [XLeRobot](https://github.com/Vector-Wangel/XLeRobot) 为主要载体，支持
-MuJoCo 仿真和真实硬件部署。
-
-<p align="center">
-  <img src="docs/images/xlerobot.png" alt="XLeRobot" width="420" />
-</p>
-
-> **项目状态**：当前处于 active development。VLA/VLN 属于实验能力，
-> 任何机器人运动都应先在仿真中验证。
-
-<span id="features"></span>
-
-## 核心能力
-
-- **Agent Loop 驱动**：Agent 根据当前任务进行推理，按需调用 Tool，并结合返回结果继续规划和执行。
-- **Tool 与 Skill 分离**：Tool 用于状态、感知和记忆等交互；机器人能力通过统一入口请求 Skill。
-- **感知与执行反馈**：结合相机观察、机器人状态和执行结果持续调整任务。
-- **仿真与真机部署**：支持 MuJoCo 仿真和 XLeRobot 真实硬件。
-- **多种交互方式**：支持 Web、CLI、语音和飞书。
-- **任务追踪与恢复**：提供任务状态、执行记录、失败恢复和 Tasks UI。
-- **具身模型驱动**：Skill 能力以 VLA、VLN 等具身模型为主要发展方向。
-
-<span id="architecture"></span>
-
-## 系统架构
-
-快慢双系统描述不同的决策层级：
-
-- **慢系统**：负责语言理解、任务规划、记忆和失败恢复。
-- **快系统**：负责感知、局部决策、安全检查和机器人执行。
-
-各层通过清晰的能力边界协作：
-
-```mermaid
-flowchart TD
-    U[用户交互] --> A[Agent Loop<br/>推理 · Tool]
-    A -->|请求 Skill| S[Skill 层<br/>能力 · 调度 · 安全]
-    S -->|模型调用| F[Foundation Model<br/>VLA · VLN]
-    F -->|决策结果| S
-    S -->|受控执行| R[Robot Runtime<br/>MuJoCo · 真机]
-    R -.执行反馈.-> A
+```text
+user / environment event
+        ↓
+slow system: Agent, task continuity, user steering, Skill selection
+        ↓ typed proposal
+fast system: Skill, observation, Robot Runtime, safety, driver
+        ↓ structured outcome + fresh observation
+slow system continues reasoning
 ```
 
-这种分层让 Agent、机器人能力、具身模型和具体硬件可以分别演进，同时保持完整的
-任务执行与反馈闭环。
+The goal is not to make one model emit an increasingly long action sequence. The goal is to let a
+robot remain interactive, advance a task across multiple Skills, respond to failures and corrections,
+and safely recover task facts after a process restart.
 
-详细设计见 [系统架构](docs/architecture/system-architecture.md)。
+<h2 id="status">Current Status</h2>
 
-<span id="quick-start"></span>
+Hey Robot has moved from the basic Harness skeleton into model and environment integration:
 
-## 快速开始
+- the Agent, Skill, Task, Robot Runtime, and ModelService path is in place;
+- XLeRobot MuJoCo provides the simulation loop;
+- InternNav is integrated with XLeRobot MuJoCo through an independent VLN ModelService;
+- LeRobot policy is integrated with RoboCasa365 through the shared ModelService contract, completing
+  the full-system validation path;
+- the XLeRobot native driver, mobile base, arm, cameras, and Robot Runtime provide the real-hardware base;
+- the next stage is XLeRobot hardware validation of InternNav and LeRobot policy execution, calibration,
+  and safety.
 
-### 环境要求
+The next milestone is transferring the integrated navigation and manipulation policies to XLeRobot
+hardware and validating the real observation, action, and safety loop.
 
-- Ubuntu / Linux
-- Python `3.12`
-- [uv](https://docs.astral.sh/uv/)
-- NATS server
-- MuJoCo
-- 可用的大模型 API
+<p align="center">
+  <img src="docs/images/architecture.png"
+       alt="Hey Robot Embodied Agent Harness architecture"
+       width="100%" />
+</p>
 
-> 当前推荐 Ubuntu。仓库保留了 Windows 配置，但现有依赖锁仅支持 Linux。
+<p align="center"><sub>Distributed model services, the fast–slow system, and one physical execution path.</sub></p>
 
-### 安装依赖
+<h2 id="why">Why a Harness?</h2>
+
+A conventional LLM tool loop can choose the next call, but a robot must also handle:
+
+- observations that become stale as actions change the world;
+- shared mobile-base, arm, camera, and safety resources;
+- user corrections arriving during physical execution;
+- Skills that can time out, fail, be cancelled, or lose execution ownership;
+- process restarts before a task completes;
+- the fact that a returned call is not the same as physical task completion.
+
+Hey Robot handles these concerns in the Harness rather than delegating all of them to a prompt. The model
+proposes one schema-constrained action; the Skill and Robot Runtime own bounded execution, resource
+exclusion, cancellation, safety checks, results, and observations.
+
+<h2>Core Design</h2>
+
+### One Agent, one task truth, one physical execution path
+
+The current system maintains these invariants:
+
+1. one deployment enables one autonomous Agent;
+2. one session has at most one non-terminal task;
+3. one Agent decision proposes at most one physical action;
+4. a Skill submission is persisted before it is dispatched;
+5. terminal Skill events update task steps idempotently and wake the Agent;
+6. an unknown physical result is never replayed automatically;
+7. emergency stop bypasses model reasoning and follows a deterministic control path.
+
+### Configuration drives composition, not runtime state
+
+Deployment configuration selects Channels, Robots, ModelServices, Skill surfaces, the bus, and resource
+paths. It does not store task progress or robot state and does not act as a hidden workflow language.
+ConversationStore, AgentTaskStore, RunStore, and Robot Runtime own their respective runtime facts.
+
+### Replaceable model and robot boundaries
+
+The same Skill surface can wrap classic control, InternNav, LeRobot policy, or another independent model
+service. Model services do not own task lifecycle, the Agent does not access drivers directly, and Robot
+Runtime does not depend on the upper Agent layer. Typed ModelService/gRPC contracts split the Agent system
+from model services across processes, dependency environments, and GPUs.
+
+<h2 id="architecture">Distributed Embodied Agent Harness · Fast–Slow Dual System</h2>
+
+The Agent system is separated from model services such as InternNav, VLA/VLN, and LeRobot policy. Models
+can run in independent processes, dependency environments, and GPU allocations. “Fast” and “slow” describe
+decision horizons rather than hard real-time guarantees. The slow system maintains goals, interaction, and
+task continuity; the fast system turns one bounded capability into guarded model, simulation, or hardware
+execution.
+
+<table>
+  <thead><tr><th></th><th>Slow · Deliberative</th><th>Fast · Embodied Execution</th></tr></thead>
+  <tbody>
+    <tr><td>Horizon</td><td>Across turns, Skills, and service restarts</td><td>One bounded Skill and its local control process</td></tr>
+    <tr><td>Responsibilities</td><td>Goal interpretation, Tool selection, task progress, pause, and recovery</td><td>Perception, resource admission, model inference, safety checks, and robot execution</td></tr>
+    <tr><td>Implementation</td><td><code>Agent</code>, <code>AgentRunner</code>, <code>AgentTaskStore</code>, <code>TaskCoordinator</code></td><td><code>SkillWorker</code>, VLA/VLN options, <code>RobotRuntime</code>, Robot Drivers</td></tr>
+  </tbody>
+</table>
+
+<h2 id="capability-status">Implemented and In-Progress Capabilities</h2>
+
+<table>
+  <thead><tr><th>Capability</th><th>Status</th><th>Boundary</th></tr></thead>
+  <tbody>
+    <tr><td>Agent Tool loop</td><td>Implemented</td><td>At most one proposal per decision; malformed calls are rejected structurally</td></tr>
+    <tr><td>Durable tasks</td><td>Implemented</td><td>SQLite task/step state, continuation, pause, cancellation, and startup recovery</td></tr>
+    <tr><td>Skill Harness</td><td>Implemented</td><td>Schema, resources, timeout, cancellation, events, and RunStore</td></tr>
+    <tr><td>XLeRobot MuJoCo</td><td>Integrated</td><td>Simulation driver, observation, and robot-capability loop</td></tr>
+    <tr><td>InternNav XLeRobot simulation</td><td>Integrated and path-validated</td><td>Independent VLN ModelService, observe-plan-act, and motion mapping; hardware pending</td></tr>
+    <tr><td>LeRobot policy ModelService</td><td>Integrated</td><td>Independent policy process, observation/action mapping, and shared gRPC contract</td></tr>
+    <tr><td>RoboCasa365</td><td>Full-system path validated</td><td>LeRobot policy, ModelService, Robot Runtime, and environment are connected end to end</td></tr>
+    <tr><td>XLeRobot native driver</td><td>Integrated</td><td>Per-machine calibration, diagnostics, action bounds, and physical safety remain required</td></tr>
+    <tr><td>XLeRobot hardware InternNav / LeRobot</td><td>Next stage</td><td>Real observations, action spaces, cancellation, timeout, and safety loop</td></tr>
+  </tbody>
+</table>
+
+<h2 id="quick-start">Quick Start</h2>
+
+Recommended: Ubuntu/Linux, Python 3.12, and <a href="https://docs.astral.sh/uv/">uv</a>. A bare
+<code>uv sync</code> does not install the complete Gateway, Agent, Robot, and MuJoCo dependency set;
+use the profile command below.
 
 ```bash
 git clone https://github.com/Xbotics-Embodied-AI-club/Xbotics-Hey-Robot.git
 cd Xbotics-Hey-Robot
 
-uv sync --group dev --group sim
+uv sync --extra gateway --extra agent --extra robot --group sim --group dev
 cp .env.example .env
-```
 
-根据所选模型服务填写 `.env`。默认仿真配置使用：
-
-```text
-DEEPSEEK_MODEL
-DEEPSEEK_API_KEY
-DEEPSEEK_BASE_URL
-DASHSCOPE_MODEL
-DASHSCOPE_API_KEY
-```
-
-> 更完整的环境、模型、语音、飞书、仿真与真机配置，请阅读
-> [在线配置指南（持续更新）](https://my.feishu.cn/docx/LT3odU5yyoMOCNxXmmicvbCznBb)。
-
-### 启动 NATS
-
-```bash
-nats-server
-```
-
-也可以使用 Docker：
-
-```bash
-docker compose up -d nats
-```
-
-### 运行 MuJoCo 仿真
-
-默认仿真配置同时启用了语音和飞书。首次只使用 Web 时，请先关闭对应通道；
-具体配置见 [XLeRobot 仿真部署](docs/operations/xlerobot-sim.md)。
-
-```bash
 uv run hey-robot inspect --config configs/xlerobot.sim.ubuntu.yaml
 uv run hey-robot run --config configs/xlerobot.sim.ubuntu.yaml
 ```
 
-启动后访问：
+InternNav simulation requires an independent model environment and the InternNav submodule. See
+[`docs/operations/xlerobot-sim.md`](docs/operations/xlerobot-sim.md).
 
-| 页面 | 地址 |
-|---|---|
-| 对话界面 | <http://127.0.0.1:8080/chat> |
-| 任务看板 | <http://127.0.0.1:8080/tasks> |
+For the full RoboCasa365 evaluation path, see
+[`docs/evaluation/robocasa365/runbook.zh-CN.md`](docs/evaluation/robocasa365/runbook.zh-CN.md).
 
-<span id="real-robot"></span>
+<h2 id="real-robot">XLeRobot Hardware</h2>
 
-## XLeRobot 真机
-
-真机运行前先检查平台、部署配置和硬件映射：
+The default hardware profile exposes only scene inspection and basic base motion. Before connecting
+hardware, validate the platform, serial bus, servos, cameras, battery, and physical emergency stop:
 
 ```bash
 uv run python scripts/ops/check_platform.py \
   --config configs/xlerobot.real.ubuntu.yaml
-
-uv run hey-robot inspect \
-  --config configs/xlerobot.real.ubuntu.yaml
-
+uv run hey-robot inspect --config configs/xlerobot.real.ubuntu.yaml
 uv run python scripts/robots/xlerobot/diagnose.py \
   --config configs/xlerobot.real.ubuntu.yaml
 ```
 
-确认串口、舵机、相机和电池状态后启动：
+InternNav and LeRobot policy already have shared integration paths, but simulation or RoboCasa365 profiles
+must not be used directly on hardware. A hardware profile must independently validate:
 
-```bash
-uv run hey-robot run --config configs/xlerobot.real.ubuntu.yaml
-```
+- camera and observation mapping;
+- action dimensions, ranges, and frequency;
+- calibration, home/rest positions, and resource exclusion;
+- timeout, cancellation, and emergency stop;
+- unloaded, low-speed execution in a controlled workspace.
 
-详细步骤见 [XLeRobot 真机部署](docs/operations/xlerobot-real.md)。
+See [`docs/operations/xlerobot-real.md`](docs/operations/xlerobot-real.md) for the complete procedure.
 
-## VLA / VLN
+<h2 id="safety">Safety Boundaries</h2>
 
-VLA 和 VLN 以独立模型服务接入，用于机器人操作和视觉语言导航。
-相关代码和实验配置已经纳入仓库，但模型权重、GPU 环境和完整执行闭环仍需单独准备与验证。
+- validate all motion in MuJoCo before connecting real hardware;
+- keep a physical emergency stop or power cutoff available during hardware tests;
+- validate model observations, actions, and safety settings for the target robot;
+- explicitly expose arm, base, and VLA/VLN permissions through `skills.tools`.
 
-实验入口见 `configs/xlerobot.sim.vla_vln.yaml`，技术细节见
-[ModelService RPC 协议](docs/architecture/model-service-rpc-proto.md)。
+<h2 id="code-structure">Code Structure</h2>
 
-## 安全提示
+<table>
+  <thead><tr><th>Path</th><th>Responsibility</th></tr></thead>
+  <tbody>
+    <tr><td><code>src/hey_robot/cognition</code></td><td>Agent, task state, conversation context, and Tool loop</td></tr>
+    <tr><td><code>src/hey_robot/skills</code></td><td>Skill schema, worker, option runners, and result contracts</td></tr>
+    <tr><td><code>src/hey_robot/robot_runtime</code></td><td>Resources, safety, observations, and robot execution boundary</td></tr>
+    <tr><td><code>src/hey_robot/robot_backends</code></td><td>MuJoCo, XLeRobot, and RoboCasa environment adapters</td></tr>
+    <tr><td><code>src/hey_robot/foundation</code></td><td>VLA/VLN/LeRobot ModelService contracts and backends</td></tr>
+    <tr><td><code>src/hey_robot/config</code></td><td>Typed deployment configuration and startup validation</td></tr>
+    <tr><td><code>configs/</code></td><td>Deployment, simulation, hardware, and evaluation profiles</td></tr>
+    <tr><td><code>tests/</code></td><td>Contract, architecture-boundary, component, and integration tests</td></tr>
+  </tbody>
+</table>
 
-- 先在 MuJoCo 仿真中验证，再接入真实机器人。
-- 真机运行时保持急停或断电手段可用。
-- 不要在人员、宠物、易碎物或不稳定环境附近直接测试运动能力。
-- 修改串口、舵机 ID、相机编号或机械结构后，重新运行诊断。
-- VLA/VLN 必须单独验证后才能用于真机运动。
+<h2 id="documentation">Documentation</h2>
 
-## 参与开发
+- [Documentation index](docs/index.md)
+- [System architecture](docs/architecture/system-architecture.md)
+- [Configuration reference](docs/reference/configuration.md)
+- [XLeRobot simulation](docs/operations/xlerobot-sim.md)
+- [XLeRobot hardware](docs/operations/xlerobot-real.md)
+- [RoboCasa365 evaluation](docs/evaluation/robocasa365/runbook.zh-CN.md)
+- [Minimal Embodied Agent Harness guide](docs/development/minimal-embodied-agent-harness-guide.zh-CN.md)
+- [Paper draft](docs/references/paper-draft.md)
+
+<h2 id="development">Development Checks</h2>
 
 ```bash
 uv run poe style
@@ -206,61 +242,37 @@ uv run poe lint
 uv run poe test
 ```
 
-主要目录：
+<h2 id="community">Community and Contributions</h2>
 
-```text
-src/        核心系统代码
-configs/    仿真与真机配置
-frontend/   Web 交互界面
-docs/       架构、部署和开发文档
-scripts/    诊断、模型下载和维护脚本
-tests/      单元与集成测试
-```
-
-贡献前请阅读 [贡献指南](docs/development/contributing.md) 和
-[Skill 扩展指南](docs/development/skill-extension.md)。
-
-<span id="documentation"></span>
-
-## 项目文档
-
-| 主题 | 文档 |
-|---|---|
-| 完整配置 | [在线配置指南（持续更新）](https://my.feishu.cn/docx/LT3odU5yyoMOCNxXmmicvbCznBb) |
-| 系统概览 | [部署与运行形态](docs/overview/runtime-shape.md) |
-| 架构设计 | [系统架构](docs/architecture/system-architecture.md) |
-| Agent 与机器人能力 | [Agent 与 Skill 边界](docs/architecture/agent-skill-boundaries.md) |
-| MuJoCo 仿真 | [XLeRobot 仿真部署](docs/operations/xlerobot-sim.md) |
-| 真实机器人 | [XLeRobot 真机部署](docs/operations/xlerobot-real.md) |
-| 开发扩展 | [Skill 扩展指南](docs/development/skill-extension.md) |
-
-## 活动与参考
-
-本项目来自开源机器人 XLeRobot 动手实战工作坊相关实践。
-
-- [开源机器人 XLeRobot 动手实战工作坊](https://mp.weixin.qq.com/s/TahLTjvvP9MoisCOCVkEBA)
-- [XLeRobot 官方仓库](https://github.com/Vector-Wangel/XLeRobot)
-- [项目活动与参考资料](docs/references/project-references.md)
-
-## 社区
+Hey Robot grows from the open-source XLeRobot ecosystem. Contributions to the Harness, robot drivers,
+interaction surfaces, and embodied-model integrations are welcome through Issues, Pull Requests, and the
+community channels below.
 
 <div align="center">
   <table>
     <tr>
       <td align="center">
-        <img src="docs/images/xbotics-wechat-official-account.png" alt="Xbotics 微信公众号" width="150" />
-        <br />
-        <sub>Xbotics 公众号</sub>
+        <img src="docs/images/xbotics-wechat-official-account.png" alt="Xbotics WeChat official account" width="150" />
+        <br /><sub>Xbotics official account</sub>
       </td>
       <td align="center">
-        <img src="docs/images/developer-wechat.jpg" alt="开发者微信" width="110" />
-        <br />
-        <sub>开发者微信</sub>
+        <img src="docs/images/developer-wechat.jpg" alt="Developer WeChat" width="110" />
+        <br /><sub>Developer contact</sub>
       </td>
     </tr>
   </table>
 </div>
 
-## License
+Before contributing, read [`CONTRIBUTING.md`](CONTRIBUTING.md) and
+[`docs/development/skill-extension.md`](docs/development/skill-extension.md).
 
-MIT License. See [LICENSE](LICENSE).
+<p align="center">
+  <a href="https://github.com/Vector-Wangel/XLeRobot">XLeRobot</a> ·
+  <a href="docs/references/project-references.md">Project references</a> ·
+  <a href="LICENSE">MIT License</a>
+</p>
+
+<h2 id="license">License</h2>
+
+This project is licensed under the [MIT License](LICENSE). Papers, third-party models, and reference
+materials remain subject to their own licenses and upstream terms.

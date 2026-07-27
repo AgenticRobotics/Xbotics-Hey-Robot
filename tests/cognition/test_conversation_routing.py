@@ -1,100 +1,123 @@
 from __future__ import annotations
 
-from hey_robot.cognition.autonomous_agent_service import _tool_outcome_context
+from typing import Any
+
 from hey_robot.cognition.runtime.agent_task_store import AgentTaskStore
-from hey_robot.cognition.tools.robot import (
-    CompleteTaskProposal,
-    ToolDependencies,
-    ToolRegistry,
-)
-from hey_robot.protocol import (
-    ActionProposal,
-    Envelope,
-    ToolOutcome,
-)
-from hey_robot.skill_os.base import SkillCatalog, SkillSpec
+from hey_robot.cognition.tools.models import PhysicalToolCall
+from hey_robot.cognition.tools.registry import ToolDependencies, ToolRegistry
+from hey_robot.protocol import Envelope, ToolOutcome
+from hey_robot.skills.models import Skill, SkillResult
+
+
+class SkillList:
+    def __init__(self, skills: tuple[Skill, ...]) -> None:
+        self._skills = {skill.name: skill for skill in skills}
+
+    def get(self, name: str) -> Skill:
+        return self._skills[name]
+
+    def list(self) -> tuple[Skill, ...]:
+        return tuple(self._skills.values())
+
+
+async def _noop(*_args: Any, **_kwargs: Any) -> SkillResult:
+    return SkillResult(True, "ok", "completed")
 
 
 def test_conversation_skill_does_not_upgrade_by_category() -> None:
-    catalog = SkillCatalog(
+    catalog = SkillList(
         (
-            SkillSpec(
+            Skill(
                 name="navigate_once",
                 description="bounded navigation skill",
-                category="navigation",
-                input_schema={"type": "object", "properties": {}},
+                parameters={"type": "object", "properties": {}},
+                handler=_noop,
             ),
         )
     )
-    tools = ToolRegistry(ToolDependencies(catalog))
+    tools = ToolRegistry(ToolDependencies(catalog.list()))
 
-    proposal = tools.proposal("request_skill", {"skill": "navigate_once"})
+    proposal = tools.prepare("navigate_once", {})
 
-    assert proposal.intent_kind == "skill"
-    assert proposal.skill_name == "navigate_once"
-
-
-def test_complete_task_requires_evidence_ids() -> None:
-    tools = ToolRegistry(ToolDependencies(SkillCatalog(())))
-
-    proposal = tools.proposal(
-        "complete_task",
-        {"recap": "已经进入并观察。", "evidence_ids": ["observation:op1"]},
-    )
-
-    assert isinstance(proposal, CompleteTaskProposal)
-    assert proposal.evidence_ids == ("observation:op1",)
+    assert proposal == PhysicalToolCall("navigate_once", {})
 
 
-def test_bounded_option_result_requires_reobservation_in_next_turn() -> None:
-    proposal = ActionProposal("skill", "manipulate", "pick up cup", {})
-    outcome = ToolOutcome(
-        "completed",
-        "bounded option ended",
-        data={"requires_reobservation": True},
-    )
+def test_complete_task_is_not_model_visible() -> None:
+    tools = ToolRegistry(ToolDependencies(()))
 
-    context = _tool_outcome_context(proposal, outcome)
-
-    assert "先调用 request_observation" in context
-    assert "不能仅凭动作调用成功" in context
+    assert "complete_task" not in tools.names
 
 
-def test_sustained_task_completion_requires_post_motion_observation(
-    tmp_path,
-) -> None:
+def test_durable_task_closes_on_final_assistant_text(tmp_path) -> None:
     store = AgentTaskStore(tmp_path / "tasks.sqlite3")
     task = store.create_task(
         session_key="session-1",
         envelope=Envelope(robot_id="sim_robot"),
         objective="进入门廊并观察里面有什么",
     )
-    move = store.add_step(
-        task.task_id,
-        ActionProposal("skill", "move_base", "move", {"direction": "forward"}),
-        ToolOutcome("completed", "Base motion completed.", operation_id="move1"),
-    )
+    store.close_task(task.task_id, recap="需要更多信息。")
 
-    check = store.complete_task(
-        task.task_id,
-        recap="已经进入。",
-        evidence_ids=move.evidence_ids,
-    )
-
-    assert not check.accepted
-    observation = store.add_step(
-        task.task_id,
-        ActionProposal(
-            "observation", "inspect_scene", "inspect", {"question": "inside"}
-        ),
-        ToolOutcome("completed", "里面有桌椅。", operation_id="obs1"),
-    )
-    check = store.complete_task(
-        task.task_id,
-        recap="看到里面有桌椅。",
-        evidence_ids=observation.evidence_ids,
-    )
-
-    assert check.accepted
     assert store.active_task("session-1") is None
+    assert store.task(task.task_id).final_recap == "需要更多信息。"  # type: ignore[union-attr]
+    store.close()
+
+
+def test_failed_physical_step_closes_task_as_failed(tmp_path) -> None:
+    store = AgentTaskStore(tmp_path / "tasks.sqlite3")
+    task = store.create_task(
+        session_key="session-1",
+        envelope=Envelope(robot_id="sim_robot"),
+        objective="turn left",
+    )
+    store.add_step(
+        task.task_id,
+        PhysicalToolCall("turn_base", {"direction": "left", "angle_deg": 90}),
+        ToolOutcome("failed", "turn failed"),
+    )
+
+    store.close_task(task.task_id, recap="无法完成左转。")
+
+    closed = store.task(task.task_id)
+    assert closed is not None
+    assert closed.status == "failed"
+    assert closed.final_recap == "无法完成左转。"
+    store.close()
+
+
+def test_task_store_persists_pending_run_and_ignores_replayed_events(tmp_path) -> None:
+    store = AgentTaskStore(tmp_path / "tasks.sqlite3")
+    task = store.create_task(
+        session_key="session-1",
+        envelope=Envelope(robot_id="sim_robot"),
+        objective="inspect the desk",
+    )
+    proposal = PhysicalToolCall("inspect_scene", {})
+    pending = store.add_pending_step(
+        task.task_id,
+        proposal,
+        run_id="run-1",
+        tool_call_id="call-1",
+    )
+
+    assert pending.status == "pending"
+    assert pending.outcome.status == "accepted"
+    resolved = store.resolve_pending_step(
+        "run-1",
+        outcome=ToolOutcome("completed", "desk observed", operation_id="run-1"),
+        status="completed",
+        event_sequence=3,
+    )
+
+    assert resolved is not None
+    assert resolved.status == "completed"
+    assert resolved.completed_at is not None
+    assert (
+        store.resolve_pending_step(
+            "run-1",
+            outcome=ToolOutcome("failed", "stale"),
+            status="failed",
+            event_sequence=2,
+        )
+        is None
+    )
     store.close()

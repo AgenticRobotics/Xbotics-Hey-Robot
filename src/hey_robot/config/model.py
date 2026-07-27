@@ -44,7 +44,7 @@ class LoggingSpec:
 
 @dataclass(frozen=True)
 class ResourceSpec:
-    runtime_dir: str = "runtime"
+    runtime_dir: str = "runtime/local"
     media_root: str = "runtime/media"
     media_max_items: int = 5000
     media_image_save_every_n: int = 1
@@ -66,13 +66,6 @@ class IdentitySpec:
     unified_user_episodes: bool = True
     default_user_id: str | None = None
     bindings: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class NotificationSpec:
-    defaults: dict[str, Any] = field(default_factory=dict)
-    channels: dict[str, dict[str, Any]] = field(default_factory=dict)
-    kinds: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -185,9 +178,17 @@ class AgentSpec:
 
 @dataclass(frozen=True)
 class SkillSurfaceConfig:
-    modules: tuple[str, ...] = ("hey_robot.skill_os.builtins",)
-    enabled: tuple[str, ...] = ()
+    modules: tuple[str, ...] = ("hey_robot.skills.builtins",)
+    tools: tuple[str, ...] = ()
+    implementations: dict[str, str] = field(default_factory=dict)
     mode: str = "production"  # 可选值："production" | "bringup"
+    execution_mode: str = "local"
+
+    @property
+    def tool_names(self) -> tuple[str, ...]:
+        """配置给 Agent 使用的 native Skill surface。"""
+
+        return self.tools
 
 
 @dataclass(frozen=True)
@@ -195,14 +196,7 @@ class AgentRuntimeSpec:
     enabled: bool = False
     robot_id: str | None = None
     hard_max_wall_time_sec: float = 3600.0
-    hard_max_continuations: int = 40
     hard_max_skills: int = 24
-    skill_result_timeout_sec: float = 45.0
-    min_battery_percentage: float = 20.0
-    entity_catalog: tuple[str, ...] = ()
-    entity_aliases: dict[str, str] = field(default_factory=dict)
-    enable_auto_reobserve_once: bool = False
-    enable_no_progress_review: bool = False
 
 
 @dataclass(frozen=True)
@@ -210,7 +204,6 @@ class DeploymentConfig:
     deployment: DeploymentSpec = field(default_factory=DeploymentSpec)
     logging: LoggingSpec = field(default_factory=LoggingSpec)
     resources: ResourceSpec = field(default_factory=ResourceSpec)
-    notifications: NotificationSpec = field(default_factory=NotificationSpec)
     identity: IdentitySpec = field(default_factory=IdentitySpec)
     channels: dict[str, ChannelSpec] = field(default_factory=dict)
     robots: dict[str, RobotSpec] = field(default_factory=dict)
@@ -300,7 +293,9 @@ class DeploymentConfig:
         episodes_data = resources_data.get("episodes", {}) or {}
         events_data = resources_data.get("events", {}) or {}
         resources = ResourceSpec(
-            runtime_dir=str(resources_data.get("runtime_dir", "runtime")),
+            runtime_dir=str(
+                resources_data.get("runtime_dir", f"runtime/{deployment.id}")
+            ),
             media_root=str(media_data.get("root", "runtime/media")),
             media_max_items=int(media_data.get("max_items", 5000)),
             media_image_save_every_n=max(
@@ -308,22 +303,6 @@ class DeploymentConfig:
             ),
             episodes_root=str(episodes_data.get("root", "runtime/episodes")),
             events_max_items=int(events_data.get("retain", 1000)),
-        )
-        notifications_data = data.get("notifications", {}) or {}
-        notifications = NotificationSpec(
-            defaults=dict(notifications_data.get("defaults", {}) or {}),
-            channels={
-                str(name): dict(value or {})
-                for name, value in dict(
-                    notifications_data.get("channels", {}) or {}
-                ).items()
-            },
-            kinds={
-                str(name): dict(value or {})
-                for name, value in dict(
-                    notifications_data.get("kinds", {}) or {}
-                ).items()
-            },
         )
         identity_data = data.get("identity", {}) or {}
         identity = IdentitySpec(
@@ -343,11 +322,21 @@ class DeploymentConfig:
             },
         )
         skills_data = data.get("skills", {}) or {}
+        unknown_skill_fields = set(skills_data) - {
+            "modules",
+            "tools",
+            "implementations",
+            "mode",
+            "execution_mode",
+        }
+        if unknown_skill_fields:
+            raise ValueError(
+                f"skills uses unknown fields: {sorted(unknown_skill_fields)}"
+            )
         return cls(
             deployment=deployment,
             logging=logging_spec,
             resources=resources,
-            notifications=notifications,
             identity=identity,
             channels={
                 name: ChannelSpec(
@@ -472,18 +461,26 @@ class DeploymentConfig:
                 modules=tuple(
                     str(item).strip()
                     for item in skills_data.get(
-                        "modules", ("hey_robot.skill_os.builtins",)
+                        "modules", ("hey_robot.skills.builtins",)
                     )
-                    or ("hey_robot.skill_os.builtins",)
+                    or ("hey_robot.skills.builtins",)
                     if str(item).strip()
                 )
-                or ("hey_robot.skill_os.builtins",),
-                enabled=tuple(
+                or ("hey_robot.skills.builtins",),
+                tools=tuple(
                     str(item).strip()
-                    for item in skills_data.get("enabled", ()) or ()
+                    for item in skills_data.get("tools", ()) or ()
                     if str(item).strip()
                 ),
+                implementations={
+                    str(name).strip(): str(value).strip()
+                    for name, value in (
+                        skills_data.get("implementations", {}) or {}
+                    ).items()
+                    if str(name).strip() and str(value).strip()
+                },
                 mode=str(skills_data.get("mode", "production")),
+                execution_mode=str(skills_data.get("execution_mode", "local")),
             ),
             agent_runtime=AgentRuntimeSpec(
                 enabled=bool(agent_runtime_data.get("enabled", False)),
@@ -491,33 +488,7 @@ class DeploymentConfig:
                 hard_max_wall_time_sec=float(
                     agent_runtime_data.get("hard_max_wall_time_sec", 3600.0)
                 ),
-                hard_max_continuations=int(
-                    agent_runtime_data.get("hard_max_continuations", 40)
-                ),
                 hard_max_skills=int(agent_runtime_data.get("hard_max_skills", 24)),
-                skill_result_timeout_sec=float(
-                    agent_runtime_data.get("skill_result_timeout_sec", 45.0)
-                ),
-                min_battery_percentage=float(
-                    agent_runtime_data.get("min_battery_percentage", 20.0)
-                ),
-                entity_catalog=tuple(
-                    str(item)
-                    for item in agent_runtime_data.get("entity_catalog", ()) or ()
-                ),
-                entity_aliases={
-                    str(alias).strip(): str(entity_id).strip()
-                    for alias, entity_id in dict(
-                        agent_runtime_data.get("entity_aliases", {}) or {}
-                    ).items()
-                    if str(alias).strip() and str(entity_id).strip()
-                },
-                enable_auto_reobserve_once=bool(
-                    agent_runtime_data.get("enable_auto_reobserve_once", False)
-                ),
-                enable_no_progress_review=bool(
-                    agent_runtime_data.get("enable_no_progress_review", False)
-                ),
             ),
         )
 

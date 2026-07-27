@@ -2,12 +2,28 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
-from hey_robot.cognition.tools.robot import ToolDependencies, ToolRegistry
-from hey_robot.skill_os.base import SkillCatalog
+from hey_robot.cognition.tools.registry import ToolDependencies, ToolRegistry
+from hey_robot.skills.models import Skill, SkillResult
 
 ROOT = Path(__file__).resolve().parents[2]
 COGNITION_ROOT = ROOT / "src" / "hey_robot" / "cognition"
+
+
+class SkillList:
+    def __init__(self, skills: tuple[Skill, ...]) -> None:
+        self._skills = {skill.name: skill for skill in skills}
+
+    def get(self, name: str) -> Skill:
+        return self._skills[name]
+
+    def list(self) -> tuple[Skill, ...]:
+        return tuple(self._skills.values())
+
+
+async def _noop(*_args: Any, **_kwargs: Any) -> SkillResult:
+    return SkillResult(True, "ok", "completed")
 
 
 def _cognition_source_files() -> list[Path]:
@@ -15,14 +31,9 @@ def _cognition_source_files() -> list[Path]:
 
 
 def test_robot_agent_has_one_canonical_tool_registry() -> None:
-    registry = ToolRegistry(ToolDependencies(SkillCatalog(())))
+    registry = ToolRegistry(ToolDependencies(()))
     names = {definition["function"]["name"] for definition in registry.definitions}
-    assert names == {
-        "request_observation",
-        "request_skill",
-        "complete_task",
-        "control_task",
-    }
+    assert names == set()
 
 
 def test_cognition_path_does_not_import_legacy_tools() -> None:
@@ -61,6 +72,13 @@ def test_agent_service_does_not_publish_skill_intent() -> None:
     text = agent_path.read_text(encoding="utf-8")
     assert "skill_intent" not in text, "agent_service references skill_intent"
     assert "SkillIntent(" not in text, "agent_service constructs SkillIntent"
+
+
+def test_agent_service_consumes_skill_client_events_not_bus_topic() -> None:
+    agent_path = COGNITION_ROOT / "autonomous_agent_service.py"
+    text = agent_path.read_text(encoding="utf-8")
+    assert "self.topics.skill_run_event" not in text
+    assert "_consume_skill_events" in text
 
 
 def test_removed_supervisor_path_does_not_exist() -> None:

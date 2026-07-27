@@ -7,7 +7,7 @@ import re
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from hey_robot.bus.factory import create_bus_client
 from hey_robot.channels import (
@@ -32,15 +32,15 @@ from hey_robot.gateway.identity import ClaimedBinding, IdentityResolver, Pending
 from hey_robot.gateway.receipts import InteractionReceiptStore
 from hey_robot.health import HealthReportService
 from hey_robot.logging import HeyRobotLogger
+from hey_robot.persistence import FileRunStore
 from hey_robot.protocol import (
+    AgentControl,
     AgentReply,
     ConversationResult,
     ConversationTurn,
     Envelope,
     RobotStatus,
-    SkillControl,
     SkillEvent,
-    SkillResult,
     Topics,
     UserTurn,
 )
@@ -48,7 +48,6 @@ from hey_robot.protocol.messages import (
     from_payload,
     to_payload,
 )
-from hey_robot.skill_os import SkillStore
 
 logger = HeyRobotLogger(name="gateway")
 _BINDING_COMMAND = re.compile(
@@ -63,6 +62,17 @@ class GatewayService:
     def __init__(
         self, config: DeploymentConfig, *, episode_dir: str | Path | None = None
     ) -> None:
+        unsupported_channels = sorted(
+            {
+                spec.type
+                for spec in config.channels.values()
+                if spec.enabled and spec.type not in {"cli", "web", "voice", "feishu"}
+            }
+        )
+        if unsupported_channels:
+            raise ValueError(
+                f"unsupported channel type: {', '.join(unsupported_channels)}"
+            )
         self.config = config
         self.topics = Topics()
         self.episode_root = Path(episode_dir or config.resources.episodes_root)
@@ -74,20 +84,11 @@ class GatewayService:
             Path(config.resources.runtime_dir) / "events",
             max_items=config.resources.events_max_items,
         )
-        self.skill_store = SkillStore(
-            Path(config.resources.runtime_dir) / "skills",
-            max_items=config.resources.events_max_items,
-        )
-        task_path = (
-            Path(config.resources.runtime_dir)
-            / config.deployment.id
-            / "sustained_tasks.sqlite3"
-        )
+        self.run_store = FileRunStore(Path(config.resources.runtime_dir) / "runs")
+        task_path = Path(config.resources.runtime_dir) / "sustained_tasks.sqlite3"
         self.task_store = AgentTaskStore(task_path)
         self.interaction_receipts = InteractionReceiptStore(
-            Path(config.resources.runtime_dir)
-            / config.deployment.id
-            / "interaction_receipts.sqlite3"
+            Path(config.resources.runtime_dir) / "interaction_receipts.sqlite3"
         )
         self.latest_robot_status: dict[str, RobotStatus] = {}
         self.identity = IdentityResolver(
@@ -97,6 +98,7 @@ class GatewayService:
             / "bindings.json",
         )
         self._ready = asyncio.Event()
+        self._stopped = False
         self._last_robot_status_persisted_at: dict[str, float] = {}
         self._register_channels()
 
@@ -120,11 +122,9 @@ class GatewayService:
         await self.bus.subscribe([self.topics.runtime_event], self._on_runtime_event)
         await self.bus.subscribe([self.topics.robot_status], self._on_robot_status)
         await self.bus.subscribe([self.topics.skill_event], self._on_skill_event)
-        await self.bus.subscribe([self.topics.skill_result], self._on_skill_result)
         logger.info(
             f"gateway subscribed {self.topics.agent_reply}, {self.topics.conversation_result}, {self.topics.runtime_event}, "
-            f"{self.topics.robot_status}, {self.topics.skill_event}, {self.topics.skill_result}, "
-            f"{self.topics.skill_control_result}"
+            f"{self.topics.robot_status}, {self.topics.skill_event}"
         )
         await self.channels.start_all(self._on_user_turn)
         self._log_channel_ready()
@@ -136,6 +136,9 @@ class GatewayService:
         await asyncio.Event().wait()
 
     async def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
         event = RuntimeEvent.make(EventKind.GATEWAY_SHUTDOWN, source="gateway")
         await self.events.publish(event)
         self.event_store.append(event)
@@ -173,10 +176,15 @@ class GatewayService:
             allocation.episode_id,
             replace(turn, envelope=envelope.child(episode_id=allocation.episode_id)),
         )
-        if await self._handle_safety_command(turn.text, envelope, interaction_id):
+        session_key = self._session_key(envelope)
+        if await self._handle_safety_command(
+            turn.text, envelope, interaction_id, session_key
+        ):
             self.interaction_receipts.complete(interaction_id, "safety_command")
             return
-        session_key = self._session_key(envelope)
+        kind: Literal["prompt", "steer"] = (
+            "steer" if turn.intent in {"steer", "follow_up"} else "prompt"
+        )
         await self.bus.publish(
             self.topics.conversation_turn,
             to_payload(
@@ -185,14 +193,21 @@ class GatewayService:
                     session_key,
                     interaction_id,
                     turn.text,
+                    kind,
                 )
             ),
         )
-        self.interaction_receipts.complete(interaction_id, "conversation_turn")
 
     async def _on_conversation_result(self, _topic: str, payload: dict) -> None:
         result = from_payload(ConversationResult, payload)
-        await self._send_reply(AgentReply(envelope=result.envelope, text=result.text))
+        await self._send_reply(
+            AgentReply(
+                envelope=result.envelope,
+                text=result.text,
+                final=result.final,
+                metadata={"interaction_id": result.interaction_id},
+            )
+        )
 
     def _session_key(self, envelope: Envelope) -> str:
         if self.config.identity.unified_user_episodes and envelope.user_id:
@@ -205,7 +220,11 @@ class GatewayService:
         return f"{self.config.deployment.id}:{envelope.agent_id or self._agent_id(None)}:{principal}"
 
     async def _handle_safety_command(
-        self, text: str, envelope: Envelope, interaction_id: str
+        self,
+        text: str,
+        envelope: Envelope,
+        interaction_id: str,
+        session_key: str,
     ) -> bool:
         """路由高优先级控制，无需等待 LLM 回复。"""
         normalized = " ".join(str(text or "").lower().split())
@@ -219,17 +238,17 @@ class GatewayService:
             "\u7d27\u6025\u505c\u6b62",
         }
         if compact in {item.replace(" ", "") for item in emergency}:
-            command = SkillControl(
-                envelope,
-                self._command_id(envelope, interaction_id, "emergency_stop"),
-                "emergency_stop",
-                target_skill_id=None,
-                task_id=None,
-                reason="gateway emergency stop",
-            )
-            await self.bus.publish(self.topics.skill_control, to_payload(command))
-            await self._send_reply(
-                AgentReply(envelope=envelope, text="EMERGENCY_STOP_REQUESTED")
+            await self.bus.publish(
+                self.topics.agent_control,
+                to_payload(
+                    AgentControl(
+                        envelope,
+                        session_key,
+                        interaction_id,
+                        "emergency_stop",
+                        "gateway emergency stop",
+                    )
+                ),
             )
             return True
 
@@ -240,11 +259,51 @@ class GatewayService:
             "\u53d6\u6d88\u5f53\u524d\u4efb\u52a1",
         }
         if compact in {item.replace(" ", "") for item in cancel}:
-            return False
+            await self.bus.publish(
+                self.topics.agent_control,
+                to_payload(
+                    AgentControl(
+                        envelope,
+                        session_key,
+                        interaction_id,
+                        "cancel",
+                        "user cancelled current task",
+                    )
+                ),
+            )
+            return True
+
+        pause = {"pause", "pause task", "暂停", "暂停任务"}
+        if compact in {item.replace(" ", "") for item in pause}:
+            await self.bus.publish(
+                self.topics.agent_control,
+                to_payload(
+                    AgentControl(
+                        envelope,
+                        session_key,
+                        interaction_id,
+                        "pause",
+                        "user paused current task",
+                    )
+                ),
+            )
+            return True
 
         confirmations = {"confirm", "yes", "\u786e\u8ba4", "\u7ee7\u7eed"}
         if compact in confirmations:
-            return False
+            await self.bus.publish(
+                self.topics.agent_control,
+                to_payload(
+                    AgentControl(
+                        envelope,
+                        session_key,
+                        interaction_id,
+                        "resume",
+                        "user resumed current task",
+                    )
+                ),
+            )
+            return True
 
         query = {
             "status",
@@ -289,11 +348,6 @@ class GatewayService:
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
-    @staticmethod
-    def _command_id(envelope: Envelope, interaction_id: str, action: str) -> str:
-        raw = "|".join((str(envelope.deployment_id or ""), interaction_id, action))
-        return hashlib.sha256(raw.encode()).hexdigest()
-
     async def _send_reply(self, reply: AgentReply) -> None:
         await self.bus.publish(self.topics.agent_reply, to_payload(reply))
 
@@ -303,9 +357,12 @@ class GatewayService:
             f"gateway received agent reply trace={reply.envelope.trace_id} "
             f"channel={reply.envelope.channel} text_len={len(reply.text)}"
         )
-        if reply.envelope.episode_id:
+        if reply.final and reply.envelope.episode_id:
             self.episodes.append_agent_reply(reply.envelope.episode_id, reply)
         await self.channels.send(reply)
+        interaction_id = reply.metadata.get("interaction_id")
+        if reply.final and isinstance(interaction_id, str):
+            self.interaction_receipts.complete(interaction_id, "conversation_turn")
 
     def _materialize_reply(self, reply: AgentReply) -> AgentReply:
         envelope = reply.envelope
@@ -374,7 +431,6 @@ class GatewayService:
 
     async def _on_skill_event(self, _topic: str, payload: dict) -> None:
         event = from_payload(SkillEvent, payload)
-        self.skill_store.append(event)
         ux_metadata = event.metadata.get("ux")
         ux_payload = dict(ux_metadata) if isinstance(ux_metadata, dict) else None
         await self.channels.publish_event(
@@ -399,9 +455,6 @@ class GatewayService:
                 },
             )
         )
-
-    async def _on_skill_result(self, _topic: str, payload: dict) -> None:
-        from_payload(SkillResult, payload)
 
     async def _web_history(self, envelope: Envelope, limit: int) -> dict:
         agent_id = self._agent_id(envelope.agent_id)
@@ -438,11 +491,15 @@ class GatewayService:
         if not tasks:
             return None
         task = tasks[0]
+        steps = self.task_store.recent_steps(task.task_id)
         return {
             "task": _task_payload(task),
-            "steps": [
-                _step_payload(step)
-                for step in self.task_store.recent_steps(task.task_id)
+            "steps": [_step_payload(step) for step in steps],
+            "runs": [
+                _run_payload(event)
+                for step in steps
+                if step.run_id is not None
+                if (event := self.run_store.latest_event(step.run_id)) is not None
             ],
             "health": HealthReportService(self.config).payload(robot_id=task.robot_id),
         }
@@ -456,7 +513,7 @@ class GatewayService:
 
     async def _web_runtime_summary(self, limit: int) -> dict[str, Any]:
         tasks = self.task_store.recent_tasks(limit)
-        skills = self.skill_store.recent(limit=limit)
+        runs = self.run_store.recent(limit=limit)
         events = self.event_store.recent(limit=limit)
         return {
             "tasks": [_task_payload(task) for task in tasks],
@@ -474,7 +531,7 @@ class GatewayService:
                 }
                 for status in self.latest_robot_status.values()
             ],
-            "skills": list(skills),
+            "skills": [_run_payload(event) for event in runs],
             "events": [
                 {
                     "kind": e.get("kind", ""),
@@ -494,7 +551,7 @@ class GatewayService:
             "stats": {
                 "task_count": len(tasks),
                 "robot_count": len(self.latest_robot_status),
-                "skill_count": len(skills),
+                "skill_count": len(runs),
                 "event_count": len(events or []),
             },
         }
@@ -505,11 +562,15 @@ class GatewayService:
         if not tasks:
             return None
         task = tasks[0]
+        steps = self.task_store.recent_steps(task.task_id)
         return {
             "task": _task_payload(task),
-            "steps": [
-                _step_payload(step)
-                for step in self.task_store.recent_steps(task.task_id)
+            "steps": [_step_payload(step) for step in steps],
+            "runs": [
+                _run_payload(event)
+                for step in steps
+                if step.run_id is not None
+                if (event := self.run_store.latest_event(step.run_id)) is not None
             ],
         }
 
@@ -579,6 +640,7 @@ class GatewayService:
                         tasks_list_provider=self._web_tasks_list,
                         episode_task_provider=self._web_episode_task,
                         runtime_summary_provider=self._web_runtime_summary,
+                        environment_completion_provider=self._web_environment_complete,
                     )
                 )
                 continue
@@ -589,6 +651,14 @@ class GatewayService:
                 self.channels.register(FeishuChannel(context))
                 continue
             raise ValueError(f"unsupported channel type: {spec.type}")
+
+    def _web_environment_complete(self, task_id: str, reason: str) -> dict[str, Any]:
+        task = self.task_store.task(task_id)
+        if task is None:
+            raise ValueError(f"unknown task: {task_id}")
+        self.task_store.complete_from_environment(task_id, recap=reason)
+        completed = self.task_store.task(task_id) or task
+        return _task_payload(completed)
 
     def _log_channel_ready(self) -> None:
         for name, _channel in sorted(self.channels.items()):
@@ -710,7 +780,6 @@ def _task_payload(task: AgentTask) -> dict[str, Any]:
         "created_at": task.created_at,
         "updated_at": task.updated_at,
         "step_count": task.step_count,
-        "continuation_count": task.continuation_count,
         "last_error": task.last_error,
         "final_recap": task.final_recap,
     }
@@ -721,14 +790,42 @@ def _step_payload(step: Any) -> dict[str, Any]:
         "step_id": step.step_id,
         "task_id": step.task_id,
         "sequence": step.sequence,
-        "skill": step.proposal.skill_name,
-        "intent_kind": step.proposal.intent_kind,
-        "objective": step.proposal.objective,
+        "skill": step.proposal.name,
+        "arguments": dict(step.proposal.arguments),
         "status": step.outcome.status,
         "summary": step.outcome.user_summary,
         "evidence_ids": list(step.evidence_ids),
         "started_at": step.started_at,
         "completed_at": step.completed_at,
+        "run_id": step.run_id,
+    }
+
+
+def _run_payload(event: Any) -> dict[str, Any]:
+    result = event.result
+    return {
+        "run_id": event.run_id,
+        "sequence": event.sequence,
+        "name": event.name,
+        "skill": event.name,
+        "envelope": to_payload(event.envelope),
+        "phase": event.phase,
+        "timestamp": event.timestamp,
+        "progress": event.progress,
+        "frame_id": event.frame_id,
+        "summary": result.summary if result is not None else event.summary,
+        "success": result.success if result is not None else None,
+        "failure_mode": result.failure_mode if result is not None else None,
+        "error": result.error if result is not None else None,
+        "data": dict(result.data) if result is not None else {},
+        "artifacts": [
+            {
+                "uri": artifact.uri,
+                "artifact_type": artifact.artifact_type,
+                "role": artifact.role,
+            }
+            for artifact in (result.artifacts if result is not None else ())
+        ],
     }
 
 
@@ -741,28 +838,6 @@ def _compact_status_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     if isinstance(base_control, dict):
         compact["base_control"] = _compact_base_control(base_control)
     return compact
-
-
-def _robot_state_name(last_status: Any) -> str:
-    if isinstance(last_status, dict):
-        return str(last_status.get("state") or "unknown")
-    if isinstance(last_status, str):
-        return last_status or "unknown"
-    return "unknown"
-
-
-def _robot_status_summary(last_status: Any) -> dict[str, Any]:
-    if not isinstance(last_status, dict):
-        return {}
-    metrics = last_status.get("metrics")
-    metrics = metrics if isinstance(metrics, dict) else {}
-    return {
-        "frame_id": last_status.get("frame_id"),
-        "success": last_status.get("success"),
-        "error": last_status.get("error"),
-        "battery": metrics.get("battery"),
-        "readiness": metrics.get("readiness"),
-    }
 
 
 def _runtime_event_summary(event: dict[str, Any]) -> str:

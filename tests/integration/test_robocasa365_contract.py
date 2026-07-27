@@ -15,15 +15,19 @@ from evaluation.robocasa365.full_system_benchmark import (
     _parser as trial_parser,
     _write_evaluator_action_artifact,
 )
-from hey_robot.foundation.backends.vla.lerobot.robocasa_executor import (
-    RoboCasaLeRobotPolicyExecutor,
-    _PolicyBundle,
-)
-from hey_robot.foundation.clients.models import ServiceInvocationResult
+from hey_robot.config import ModelServiceSpec
+from hey_robot.foundation.backends.lerobot import LeRobotPolicyExecutor
+from hey_robot.foundation.clients.models import ModelInferenceResult
 from hey_robot.protocol import Envelope, ImageRef, RobotObservation
-from hey_robot.robot_runtime.robocasa_remote.episode_manager import EpisodeManager
-from hey_robot.skill_os import SkillRuntime, load_skill_registry
-from hey_robot.skill_os.context import SkillContext
+from hey_robot.robocasa_backend.episode_manager import EpisodeManager
+from hey_robot.robot_api import RobotActionResult
+from hey_robot.skills import (
+    SkillCommand,
+    SkillContext,
+    SkillRunner,
+    load_skill_registry,
+)
+from hey_robot.skills.resources import ResourceManager
 
 
 class _AuthContext:
@@ -128,6 +132,29 @@ def test_option_records_come_from_skill_os_manipulate_events() -> None:
     assert len(_option_records(snapshots, trial_id="trial-1")) == 1
 
 
+def test_option_records_accept_current_gateway_run_payload() -> None:
+    snapshots = [
+        {
+            "skills": [
+                {
+                    "name": "manipulate",
+                    "skill": "manipulate",
+                    "envelope": {"chat_id": "trial-1"},
+                    "phase": "completed",
+                },
+                {
+                    "name": "inspect_scene",
+                    "skill": "inspect_scene",
+                    "envelope": {"chat_id": "trial-1"},
+                    "phase": "completed",
+                },
+            ]
+        }
+    ]
+
+    assert _option_records(snapshots, trial_id="trial-1") == [snapshots[0]["skills"][0]]
+
+
 def test_flat_condition_has_an_executable_single_option_limit() -> None:
     assert condition_for("b0").manipulate_call_limit == 1
     assert condition_for("b1").manipulate_call_limit is None
@@ -167,32 +194,34 @@ def _encoded_observation(frame_id: int = 0) -> dict[str, object]:
 
 
 def test_policy_executor_returns_one_action_without_owning_environment() -> None:
-    class Policy:
+    class Runtime:
+        policy_type = "fake"
+
         def __init__(self) -> None:
             self.reset_count = 0
             self.tasks = []
 
-        def reset(self) -> None:
+        def reset(self, seed=None) -> None:
+            del seed
             self.reset_count += 1
 
-        def select_action(self, sample):
-            self.tasks.extend(sample["task"])
-            action = np.zeros((1, 12), dtype=np.float32)
-            action[0, 3] = 1.25
+        def select_action(self, _observation, task):
+            self.tasks.append(task)
+            action = np.zeros((12,), dtype=np.float32)
+            action[3] = 1.25
             return action
 
-    policy = Policy()
-    runner = RoboCasaLeRobotPolicyExecutor(
-        environ={"ROBOCASA_POLICY": "fake", "ROBOCASA_POLICY_DEVICE": "cpu"},
-        policy_loader=lambda path, device: _PolicyBundle(
-            policy_path=path,
-            policy_type="fake",
-            device=device,
-            input_features={},
-            policy=policy,
-            preprocessor=lambda sample: sample,
-            postprocessor=lambda action: action,
-        ),
+        def cancel(self):
+            pass
+
+        def close(self):
+            pass
+
+    runtime = Runtime()
+    runner = LeRobotPolicyExecutor(
+        "robocasa365",
+        _robocasa_policy_spec(),
+        runtime_loader=lambda *_args: runtime,
     )
     request = {
         "skill_name": "manipulate",
@@ -209,45 +238,44 @@ def test_policy_executor_returns_one_action_without_owning_environment() -> None
     result = runner.execute(request)
 
     assert result["success"] is True
-    assert policy.reset_count == 1
-    assert result["metrics"]["policy_result"]["values"][3] == 1.0
-    assert result["metrics"]["policy_result"]["raw_values"][3] == 1.25
+    assert runtime.reset_count == 1
+    action = result["metrics"]["policy_result"]["actions"][0]["arguments"]
+    assert action["values"][3] == 1.0
+    assert action["raw_values"][3] == 1.25
     assert result["metrics"]["action_clipped"] is True
-    assert result["metrics"]["policy_result"]["expected_frame_id"] == 0
-    assert policy.tasks == ["Close the fridge door."]
+    assert result["metrics"]["policy_result"]["raw"]["expected_frame_id"] == 0
+    assert runtime.tasks == ["Close the fridge door."]
 
     second = runner.execute(request)
     assert second["success"] is True
-    assert policy.reset_count == 1
+    assert runtime.reset_count == 1
 
 
 def test_agent_subgoal_change_resets_policy_action_queue() -> None:
-    class Policy:
+    class Runtime:
+        policy_type = "fake"
+
         def __init__(self) -> None:
             self.reset_count = 0
 
-        def reset(self) -> None:
+        def reset(self, seed=None) -> None:
+            del seed
             self.reset_count += 1
 
-        def select_action(self, _sample):
-            return np.zeros((1, 12), dtype=np.float32)
+        def select_action(self, _observation, _task):
+            return np.zeros((12,), dtype=np.float32)
 
-    policy = Policy()
-    runner = RoboCasaLeRobotPolicyExecutor(
-        environ={
-            "ROBOCASA_POLICY": "fake",
-            "ROBOCASA_POLICY_DEVICE": "cpu",
-            "ROBOCASA_PROMPT_MODE": "agent_subgoal",
-        },
-        policy_loader=lambda path, device: _PolicyBundle(
-            policy_path=path,
-            policy_type="fake",
-            device=device,
-            input_features={},
-            policy=policy,
-            preprocessor=lambda sample: sample,
-            postprocessor=lambda action: action,
-        ),
+        def cancel(self):
+            pass
+
+        def close(self):
+            pass
+
+    runtime = Runtime()
+    runner = LeRobotPolicyExecutor(
+        "robocasa365",
+        _robocasa_policy_spec(prompt_mode="agent_subgoal"),
+        runtime_loader=lambda *_args: runtime,
     )
     request = {
         "skill_name": "manipulate",
@@ -263,40 +291,78 @@ def test_agent_subgoal_change_resets_policy_action_queue() -> None:
     request["arguments"]["task_prompt"] = "Place the kettle on the burner."
     assert runner.execute(request)["success"] is True
 
-    assert policy.reset_count == 2
+    assert runtime.reset_count == 2
+
+
+def _robocasa_policy_spec(**settings) -> ModelServiceSpec:
+    return ModelServiceSpec(
+        type="robot_policy",
+        robot_id="robocasa365",
+        provides=("manipulate",),
+        settings={
+            "runtime": "lerobot",
+            "policy_path": "fake",
+            "policy_device": "cpu",
+            "embodiment": "robocasa",
+            "action_space": "robocasa_12d",
+            "action_dimensions": 12,
+            "prompt_mode": "environment_root",
+            **settings,
+        },
+    )
 
 
 def test_generic_manipulate_executes_native_action_option() -> None:
-    class Services:
+    class Models:
         def __init__(self) -> None:
             self.calls = []
 
-        async def call(self, name, arguments):
-            self.calls.append((name, arguments))
-            return ServiceInvocationResult(
+        async def infer(
+            self, capability, request, *, run_id, robot_id, timeout_sec=None
+        ):
+            del run_id, robot_id, timeout_sec
+            self.calls.append((capability, request))
+            return ModelInferenceResult(
                 success=True,
-                status="completed",
                 summary="one action",
-                metrics={
-                    "policy_result": {
-                        "kind": "native_action",
-                        "values": [0.0] * 12,
-                        "expected_frame_id": len(self.calls) - 1,
-                    }
-                },
+                data={"values": [0.0] * 12},
             )
+
+        async def cancel(self, run_id) -> None:
+            del run_id
 
     class Robot:
         def __init__(self, observations) -> None:
             self.observations = observations
             self.calls = []
 
-        async def apply_policy_action(
-            self, values, *, expected_frame_id, raw_values=None
+        async def observe(self, robot_id, *, after_frame_id=None, timeout_sec=None):
+            del after_frame_id, timeout_sec
+            del robot_id
+            return self.observations[0]
+
+        async def execute(
+            self, robot_id, action, arguments, *, run_id, expected_frame_id=None
         ):
-            self.calls.append((values, expected_frame_id, raw_values))
-            self.observations[0] = make_observation(expected_frame_id + 1)
-            return {"success": True, "frame_id": expected_frame_id + 1, "done": False}
+            del robot_id, run_id
+            self.calls.append((action, arguments, expected_frame_id))
+            frame_id = self.observations[0].frame_id + 1
+            self.observations[0] = make_observation(frame_id)
+            return RobotActionResult(True, "applied", frame_id=frame_id)
+
+        async def capabilities(self, robot_id):
+            del robot_id
+            raise NotImplementedError
+
+        async def stop(self, robot_id, *, reason):
+            del robot_id, reason
+
+    class Events:
+        def __init__(self) -> None:
+            self.items = []
+
+        async def emit(self, event) -> None:
+            self.items.append(event)
 
     refs = [
         ImageRef(uri=f"media://{camera}", camera=camera)
@@ -314,48 +380,56 @@ def test_generic_manipulate_executes_native_action_option() -> None:
         )
 
     async def run_once() -> None:
-        services = Services()
+        models = Models()
         observations = [make_observation(0)]
         robot = Robot(observations)
-        registry = load_skill_registry(enabled=("manipulate",))
-        skill = registry.get("manipulate").spec
-        assert "task_prompt" in skill.input_schema["properties"]
-        assert "robot_control" in skill.required_resources
-        runtime = SkillRuntime(registry)
-        result = await runtime.execute(
-            "manipulate",
-            {"task_prompt": "Close the fridge.", "max_steps": 50},
+        registry = load_skill_registry(("hey_robot.skills.builtins",))
+        skill = registry.get("manipulate")
+        assert "task_prompt" in skill.parameters["properties"]
+        assert "robot_control" in skill.resources
+        runner = SkillRunner(
+            registry,
+            resources=ResourceManager(),
+            events=Events(),
             context_factory=lambda invoke: SkillContext(
-                skill_id="option-1",
+                run_id=invoke.run_id,
+                task_id=invoke.task_id,
+                robot_id=invoke.robot_id,
                 robot=robot,
-                model_services=services,
-                observation=observations[0],
-                current_observation=lambda: observations[0],
-                resolve_images=lambda refs: [
-                    np.zeros((4, 4, 3), dtype=np.uint8) for _ in refs
-                ],
-                invoke=invoke,
+                models=models,
             ),
         )
+        result = await runner.execute(
+            SkillCommand(
+                envelope=Envelope(episode_id="trial-1", robot_id="robocasa365"),
+                run_id="trial-1",
+                task_id="task-1",
+                robot_id="robocasa365",
+                name="manipulate",
+                arguments={"task_prompt": "Close the fridge.", "max_steps": 50},
+            )
+        )
         assert result.success is True
-        assert len(services.calls) == 50
+        assert len(models.calls) == 50
         assert len(robot.calls) == 50
-        assert services.calls[0][0] == "manipulate"
-        assert services.calls[0][1]["task_prompt"] == "Close the fridge."
-        assert services.calls[0][1]["policy_session_id"] == "trial-1"
-        assert result.data["termination_state"] == "unknown"
+        assert models.calls[0][0] == "manipulate"
+        assert models.calls[0][1]["task_prompt"] == "Close the fridge."
+        assert models.calls[0][1]["policy_session_id"] == "trial-1"
+        assert robot.calls[0][0] == "embodiment_native_action"
+        assert result.data["termination_reason"] == "max_steps"
 
     asyncio.run(run_once())
 
 
 def test_rollout_skill_is_removed() -> None:
-    registry = load_skill_registry()
-    assert "robocasa_rollout" not in registry.names()
-    assert "robocasa_option" not in registry.names()
+    registry = load_skill_registry(("hey_robot.skills.builtins",))
+    names = {skill.name for skill in registry.list()}
+    assert "robocasa_rollout" not in names
+    assert "robocasa_option" not in names
 
 
 def test_runtime_roles_require_distinct_credentials() -> None:
-    from hey_robot.robot_runtime.robocasa_remote.runtime_server import (
+    from hey_robot.robocasa_backend.runtime_server import (
         RoboCasaRuntimeService,
     )
 

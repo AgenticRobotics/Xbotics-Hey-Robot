@@ -7,10 +7,16 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Topics:
+    # Compatibility names retained for the public 1.x protocol surface. The current
+    # runtime does not subscribe to the retired distributed Skill execution topics.
     user_turn: str = "user.turn"
     conversation_turn: str = "conversation.turn"
     conversation_result: str = "conversation.result"
+    agent_control: str = "agent.control"
     short_operation_command: str = "short_operation.command"
+    skill_command: str = "skill.command"
+    skill_cancel: str = "skill.cancel"
+    skill_run_event: str = "skill.run.event"
     agent_reply: str = "agent.reply"
     skill_intent: str = "skill.intent"
     skill_event: str = "skill.event"

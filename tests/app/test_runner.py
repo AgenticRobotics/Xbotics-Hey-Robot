@@ -16,7 +16,7 @@ def test_deployment_runner_inspect(tmp_path: Path) -> None:
                 "media": {"root": str(tmp_path / "media")},
                 "episodes": {"root": str(tmp_path / "episodes")},
             },
-            "skills": {"enabled": ["inspect_scene", "stop_motion"]},
+            "skills": {"tools": ["inspect_scene", "stop_motion"]},
             "robots": {"mock0": {"type": "mock"}},
             "agents": {
                 "main": {
@@ -24,12 +24,11 @@ def test_deployment_runner_inspect(tmp_path: Path) -> None:
                     "robot_id": "mock0",
                     "settings": {
                         "mode": "agent",
-                        "providers": {
+                        "models": {
                             "planner": {
-                                "type": "openai_compat",
                                 "model": "mock-planner",
                                 "api_key": "test-key",
-                                "api_base": "http://127.0.0.1:9/v1",
+                                "base_url": "http://127.0.0.1:9/v1",
                             }
                         },
                     },
@@ -44,3 +43,48 @@ def test_deployment_runner_inspect(tmp_path: Path) -> None:
     assert "mock0" in info["robots"]
     assert info["issues"] == []
     assert "agent:main" in info["services"]
+
+
+def test_deployment_runner_composes_native_local_agent_without_controller(
+    tmp_path: Path,
+) -> None:
+    config = DeploymentConfig.from_dict(
+        {
+            "deployment": {"id": "native-local"},
+            "resources": {
+                "runtime_dir": str(tmp_path / "runtime"),
+                "media": {"root": str(tmp_path / "media")},
+                "episodes": {"root": str(tmp_path / "episodes")},
+            },
+            "skills": {
+                "modules": ["hey_robot.skills.builtins"],
+                "tools": ["inspect_scene"],
+                "execution_mode": "local",
+            },
+            "robots": {"mock0": {"type": "mock"}},
+            "policies": {"embodied_skills": {"robot_id": "mock0"}},
+            "agents": {
+                "main": {
+                    "robot_id": "mock0",
+                    "settings": {
+                        "models": {
+                            "planner": {
+                                "model": "mock-planner",
+                                "api_key": "test-key",
+                                "base_url": "http://127.0.0.1:9/v1",
+                            }
+                        }
+                    },
+                }
+            },
+        }
+    )
+
+    info = DeploymentRunner(config, episode_dir=tmp_path / "episodes").inspect()
+
+    assert info["issues"] == []
+    assert "robot" in info["services"]
+    assert "skills" in info["services"]
+    assert "agent:main" in info["services"]
+    assert "skill-worker:local" not in info["services"]
+    assert "skill-controller" not in info["services"]

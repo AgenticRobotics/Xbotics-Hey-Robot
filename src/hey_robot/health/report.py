@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -10,7 +11,7 @@ from typing import Any
 from hey_robot.cognition.runtime.agent_task_store import AgentTaskStore
 from hey_robot.config import DeploymentConfig
 from hey_robot.config.validation import validate_deployment
-from hey_robot.skill_os.registry import registry_from_config
+from hey_robot.skills import registry_from_config
 
 
 @dataclass(frozen=True)
@@ -45,9 +46,7 @@ class HealthReportService:
         self.config = config
         del episode_dir
         self.task_store = AgentTaskStore(
-            Path(config.resources.runtime_dir)
-            / config.deployment.id
-            / "sustained_tasks.sqlite3"
+            Path(config.resources.runtime_dir) / "sustained_tasks.sqlite3"
         )
         self.config_path = Path(config_path) if config_path is not None else None
         self.live = live
@@ -58,6 +57,7 @@ class HealthReportService:
         findings: list[HealthReport] = []
         findings.extend(self._configuration_reports(robot_id=robot_id))
         findings.extend(self._skill_readiness_reports(robot_id=robot_id))
+        findings.extend(self._projection_reports())
         if full:
             findings.extend(self._platform_reports(robot_id=robot_id))
             findings.extend(self._robot_component_reports(robot_id=robot_id))
@@ -107,15 +107,54 @@ class HealthReportService:
             )
         return reports
 
+    def _projection_reports(self) -> list[HealthReport]:
+        path = Path(self.config.resources.runtime_dir) / "skill_projection_health.json"
+        if not path.exists():
+            return []
+        try:
+            stats = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return [
+                HealthReport(
+                    component="skill.event_projection",
+                    status="degraded",
+                    severity="warning",
+                    evidence="Skill event projection health state is unreadable.",
+                    fix_hint="Check runtime storage permissions and the projection worker.",
+                    source="skill.projection",
+                )
+            ]
+        failed = int(stats.get("failed", 0))
+        dropped = int(stats.get("dropped", 0))
+        degraded = failed > 0 or dropped > 0
+        return [
+            HealthReport(
+                component="skill.event_projection",
+                status="degraded" if degraded else "ok",
+                severity="warning" if degraded else "info",
+                evidence=(
+                    f"Skill event projection published={int(stats.get('published', 0))}, "
+                    f"failed={failed}, dropped={dropped}."
+                ),
+                fix_hint=(
+                    "Inspect the message bus and Gateway consumer lag; execution facts remain in RunStore."
+                    if degraded
+                    else None
+                ),
+                source="skill.projection",
+                metadata=dict(stats),
+            )
+        ]
+
     def _skill_readiness_reports(self, *, robot_id: str | None) -> list[HealthReport]:
-        registry = registry_from_config(self.config)
         reports: list[HealthReport] = []
-        for name in registry.names(enabled_only=True):
+        registry = registry_from_config(self.config)
+        for name in self.config.skills.tool_names:
             try:
-                spec = registry.get(name).spec
+                spec = registry.get(name)
             except KeyError:
                 continue
-            resources = tuple(spec.required_resources)
+            resources = tuple(spec.resources)
             if not resources:
                 continue
             if robot_id and not _skill_matches_robot(
@@ -135,8 +174,8 @@ class HealthReportService:
                     source="skill.catalog",
                     metadata={
                         "resources": list(resources),
-                        "driver_primitives": list(spec.driver_primitives),
-                        "safety_level": spec.safety_level,
+                        "driver_primitives": list(spec.required_actions),
+                        "safety_level": "normal",
                     },
                 )
             )
@@ -158,7 +197,7 @@ class HealthReportService:
                         f"{task.status}: {reason}"
                     ),
                     impacted_skills=tuple(
-                        step.proposal.skill_name
+                        step.proposal.name
                         for step in self.task_store.recent_steps(task.task_id, 50)
                     ),
                     fix_hint=_task_fix_hint(str(reason)),
@@ -276,7 +315,7 @@ class HealthReportService:
                     (
                         "diagnostics.xlerobot.full",
                         "scripts/robots/xlerobot/diagnose.py",
-                        ("inspect_scene", "human_follow", "move_base", "set_arm_pose"),
+                        ("inspect_scene", "move_base", "set_arm_pose"),
                     ),
                     (
                         "diagnostics.xlerobot.servos",
@@ -291,7 +330,7 @@ class HealthReportService:
                     (
                         "diagnostics.xlerobot.camera",
                         "scripts/robots/xlerobot/scan_cameras.py",
-                        ("inspect_scene", "human_follow"),
+                        ("inspect_scene",),
                     ),
                 ]
             )
@@ -417,8 +456,6 @@ def _fix_hint(message: str) -> str | None:
         return (
             "Fix the runtime/media/episode path permissions or choose writable paths."
         )
-    if "skills.enabled" in lower:
-        return "Update skills.enabled so the production surface only contains semantic user-facing skills."
     return None
 
 
@@ -505,7 +542,7 @@ def _component_reports_for_robot(
                 status="configured" if ok else "missing",
                 severity="info" if ok else "warning",
                 evidence=f"device_id={device_id} backend={backend}",
-                impacted_skills=("inspect_scene", "human_follow"),
+                impacted_skills=("inspect_scene",),
                 fix_hint=None
                 if ok
                 else "Run camera scan and set components.camera.device_id.",
@@ -525,7 +562,6 @@ def _component_reports_for_robot(
                     "move_base",
                     "turn_base",
                     "base_velocity_step",
-                    "human_follow",
                 ),
                 fix_hint="Run xlerobot diagnose or servo scan before live motion.",
                 source="robot.component_config",
@@ -558,9 +594,9 @@ def _component_reports_for_robot(
 def _skills_for_resources(resources: tuple[str, ...]) -> tuple[str, ...]:
     skills: list[str] = []
     if "camera" in resources:
-        skills.extend(["inspect_scene", "human_follow"])
+        skills.append("inspect_scene")
     if "base" in resources:
-        skills.extend(["move_base", "turn_base", "base_velocity_step", "human_follow"])
+        skills.extend(["move_base", "turn_base", "base_velocity_step"])
     if "arm" in resources:
         skills.extend(["set_arm_pose", "set_gripper"])
     return tuple(dict.fromkeys(skills))

@@ -1,7 +1,7 @@
 """渠道、Agent、策略和机器人共用的稳定协议接口。"""
 
 from hey_robot.protocol.messages import (
-    ActionProposal,
+    AgentControl,
     AgentReply,
     ArtifactRef,
     ConversationResult,
@@ -17,7 +17,6 @@ from hey_robot.protocol.messages import (
     RobotStatus,
     SceneEntity,
     SceneRelation,
-    ShortOperationCommand,
     SkillControl,
     SkillControlResult,
     SkillEvent,
@@ -33,7 +32,7 @@ from hey_robot.protocol.skills import (
 from hey_robot.protocol.topics import Topics
 
 __all__ = [
-    "ActionProposal",
+    "AgentControl",
     "AgentReply",
     "ArtifactRef",
     "ConversationResult",
@@ -51,7 +50,6 @@ __all__ = [
     "RobotStatus",
     "SceneEntity",
     "SceneRelation",
-    "ShortOperationCommand",
     "SkillControl",
     "SkillControlResult",
     "SkillEvent",

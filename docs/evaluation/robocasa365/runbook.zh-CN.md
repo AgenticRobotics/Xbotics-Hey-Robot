@@ -11,7 +11,7 @@ RoboCasa365 用于在仿真厨房中评估 Hey Robot 完整 embodied-agent 系�
 用户根任务
   -> DeepSeek Agent / 快系统规划
   -> DashScope 场景理解
-  -> Skill OS: inspect_scene / manipulate
+  -> native Skill layer: inspect_scene / manipulate
   -> 标准 ModelService RPC（每次只推理一个 action）
   -> lerobot/pi052_robocasa（12D action）
   -> RobotAction / Robot Runtime
@@ -29,8 +29,8 @@ backend 内只有一个 `EpisodeManager`，它是 simulator、observation、fram
 
 - 单任务入口：`evaluation/robocasa365/full_system_benchmark.py`；
 - 批量入口：`evaluation/robocasa365/batch_full_system_benchmark.py`；
-- 唯一任务清单：`configs/evaluation/robocasa365.tasks.yaml`；
-- 唯一 Agent 配置：`configs/evaluation/robocasa365.agent.yaml`；
+- 唯一任务清单：`evaluation/robocasa365/tasks.yaml`；
+- 唯一 Agent 配置：`configs/evaluation/robocasa365.yaml`；
 - 唯一推荐启动器：`scripts/evaluation/run_robocasa365_full_system.sh`。
 
 ## 2. 已验证状态
@@ -93,12 +93,26 @@ uv sync --frozen --only-group robocasa365 --no-install-project
 scripts/evaluation/setup_robocasa365_env.sh --recreate
 ```
 
-该脚本只删除并重建项目根目录下的 `.robocasa365-venv`，不会删除模型权重或约 5 GB 的
+该脚本只删除并重建项目根目录下的 `.venv-robocasa365`，不会删除模型权重或约 5 GB 的
 RoboCasa assets。它会验证 assets 完整性，并把新环境中的 RoboCasa package 指向统一的
 `artifacts/robocasa365/merged-assets`。CUDA driver、EGL/OpenGL 系统库、模型权重和
 RoboCasa assets 是运行资源，不属于 Python dependency group。
 
-### 4.2 Provider 配置
+容器模式同样保持这个边界，但把两个进程放入不同容器：
+
+```bash
+docker-compose --profile robocasa up -d robocasa365 robocasa-policy
+```
+
+`robocasa365` 使用 `Dockerfile.robocasa365`，只承担 MuJoCo/RoboCasa
+环境与 evaluator（9092）；`robocasa-policy` 使用通用
+`Dockerfile.policy` 和 `hey-robot-policy` 镜像，加载 PI052 并提供模型服务
+（9091），不与 RoboCasa 环境混装 Python 依赖。环境依赖组仅保留 LeRobot
+环境适配所需的 Torch/torchvision，不安装 Transformers、Datasets 或视频解码工具。
+当前不再维护单独的普通
+XLeRobot Policy Compose 服务。
+
+### 4.2 模型配置
 
 项目根目录的 `.env` 需要配置以下变量：
 
@@ -112,10 +126,12 @@ DEEPSEEK_API_KEY=...
 DEEPSEEK_BASE_URL=...
 ```
 
-不要把真实 API key 写入本文、命令行参数或评测 artifact。唯一启动器会自动读取 `.env`。
+这些模型都通过 OpenAI Python SDK 的 Chat Completions 接口调用；DeepSeek 与 Qwen 使用各自
+的 OpenAI-compatible `BASE_URL`。不要把真实 API key 写入本文、命令行参数或评测 artifact。
+唯一启动器会自动读取 `.env`。
 
 PI052 checkpoint、device、prompt mode、horizon 和 timeout 只在
-`configs/evaluation/robocasa365.agent.yaml` 中配置：
+`configs/evaluation/robocasa365.yaml` 中配置：
 
 ```text
 policy_path: lerobot/pi052_robocasa
@@ -178,7 +194,7 @@ PI052 checkpoint 约 10.9 GB，当前宿主首次冷加载通常需要 4～5 分
 - `b1`：使用正常层级规划并在 option 边界重新观察；
 - `b2`：冻结“观察—根目标操作—再观察”的 oracle pattern。
 
-三者只是同一 Agent 入口的实验提示，共用相同 Gateway、Skill OS、RPC、VLA 和
+三者只是同一 Agent 入口的实验提示，共用相同 Gateway、SkillWorker、RPC、VLA 和
 EpisodeManager，不存在 condition 专属 runner 或动作路径。
 
 ## 7. 批量评测
@@ -196,7 +212,7 @@ EpisodeManager，不存在 condition 专属 runner 或动作路径。
   --timeout-sec 7200
 ```
 
-任务分组来自 `configs/evaluation/robocasa365.tasks.yaml`：
+任务分组来自 `evaluation/robocasa365/tasks.yaml`：
 
 - `atomic_gate`：基础原子能力门禁；
 - `composite_seen`：组合已见任务；
@@ -225,7 +241,7 @@ runtime_metadata.json
 video.mp4
 ```
 
-其中已删除重复且没有独立事实来源的 `model_service_events.jsonl`；option 生命周期以 Skill OS
+其中已删除重复且没有独立事实来源的 `model_service_events.jsonl`；option 生命周期以 Skill
 的 `options.jsonl` 为准，动作以 evaluator-only action ledger 的 `actions.jsonl` 为准。
 
 最重要的字段位于 `result.json`：
@@ -247,12 +263,13 @@ video.mp4
 ```bash
 .venv/bin/pytest -q --no-cov \
   tests/integration/test_robocasa365_contract.py \
-  tests/robot_runtime/test_robocasa_remote_driver.py
+  tests/robot_backends/robocasa_remote/test_driver.py
 
 .venv/bin/ruff check \
   evaluation/robocasa365 \
-  src/hey_robot/robot_runtime/robocasa_remote \
-  src/hey_robot/skill_os/builtins/manipulation.py
+  src/hey_robot/robot_backends/robocasa_remote \
+  src/hey_robot/robocasa_backend \
+  src/hey_robot/skills/builtins/manipulation.py
 ```
 
 常见现象：

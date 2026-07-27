@@ -49,11 +49,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 .venv/bin/hey-robot run \
-  --config configs/evaluation/robocasa365.agent.yaml >"$agent_log" 2>&1 &
+  --config configs/evaluation/robocasa365.yaml >"$agent_log" 2>&1 &
 agent_pid=$!
 printf '%s\n' 'robocasa365: Hey Robot deployment started'
 
-for _ in $(seq 1 60); do
+startup_timeout_sec="${ROBOCASA_STARTUP_TIMEOUT_SEC:-660}"
+for _ in $(seq 1 "$startup_timeout_sec"); do
   if curl --fail --silent http://127.0.0.1:18080/api/tasks >/dev/null; then
     break
   fi

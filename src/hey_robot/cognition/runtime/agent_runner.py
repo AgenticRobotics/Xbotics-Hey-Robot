@@ -7,8 +7,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
+from hey_robot.model import ModelClientLike, ModelMessage, TextDeltaCallback
 from hey_robot.protocol import FailurePayload
-from hey_robot.providers import ReasoningMessage, ReasoningProvider
 
 
 class ToolRegistryLike(Protocol):
@@ -17,12 +17,12 @@ class ToolRegistryLike(Protocol):
     @property
     def definitions(self) -> list[dict[str, object]]: ...
 
-    def proposal(self, name: str, arguments: dict[str, object]) -> object: ...
+    def prepare(self, name: str, arguments: dict[str, object]) -> object: ...
 
 
 @dataclass(frozen=True)
 class AgentTurnRequest:
-    messages: tuple[ReasoningMessage, ...]
+    messages: tuple[ModelMessage, ...]
     allowed_tools: frozenset[str]
     deadline: float
     run_id: str
@@ -49,18 +49,23 @@ class AgentTurnResult:
 class AgentRunner:
     """返回文本或一个带类型的提案；绝不执行外部 IO。"""
 
-    def __init__(self, provider: ReasoningProvider, tools: ToolRegistryLike) -> None:
-        self._provider = provider
+    def __init__(self, model: ModelClientLike, tools: ToolRegistryLike) -> None:
+        self._model = model
         self._tools = tools
 
-    async def run(self, request: AgentTurnRequest) -> AgentTurnResult:
+    async def run(
+        self,
+        request: AgentTurnRequest,
+        *,
+        on_text_delta: TextDeltaCallback | None = None,
+    ) -> AgentTurnResult:
         if not request.messages or any(
-            not isinstance(message, ReasoningMessage) for message in request.messages
+            not isinstance(message, ModelMessage) for message in request.messages
         ):
             return self._failure(
                 "CONTEXT_BUILD",
                 "INVALID_MODEL_MESSAGES",
-                "messages must contain ReasoningMessage values",
+                "messages must contain ModelMessage values",
             )
         definitions = self._allowed_definitions(request.allowed_tools)
         if definitions is None:
@@ -71,25 +76,29 @@ class AgentRunner:
             )
         if time.monotonic() >= request.deadline:
             return self._failure(
-                "MODEL_REQUEST", "PROVIDER_TIMEOUT", "decision deadline elapsed"
+                "MODEL_REQUEST", "MODEL_TIMEOUT", "decision deadline elapsed"
             )
         try:
             response = await asyncio.wait_for(
-                self._provider.chat(messages=list(request.messages), tools=definitions),
+                self._model.chat(
+                    messages=list(request.messages),
+                    tools=definitions,
+                    on_text_delta=on_text_delta,
+                ),
                 timeout=max(0.001, request.deadline - time.monotonic()),
             )
         except TimeoutError:
             return self._failure(
-                "MODEL_REQUEST", "PROVIDER_TIMEOUT", "provider request timed out"
+                "MODEL_REQUEST", "MODEL_TIMEOUT", "model request timed out"
             )
         except Exception as exc:
-            return self._failure("MODEL_REQUEST", "PROVIDER_ERROR", str(exc))
+            return self._failure("MODEL_REQUEST", "MODEL_ERROR", str(exc))
 
         if response.finish_reason == "error":
             return self._failure(
                 "MODEL_REQUEST",
-                "PROVIDER_ERROR",
-                response.content or "provider returned an error",
+                "MODEL_ERROR",
+                response.content or "model returned an error",
             )
         if len(response.tool_calls) > 1:
             return self._failure(
@@ -105,7 +114,7 @@ class AgentRunner:
                     "TOOL_VALIDATION", "UNKNOWN_TOOL", call.name, (record,)
                 )
             try:
-                proposal = self._tools.proposal(call.name, dict(call.arguments))
+                proposal = self._tools.prepare(call.name, dict(call.arguments))
             except (KeyError, TypeError, ValueError) as exc:
                 return self._failure(
                     "TOOL_VALIDATION", "INVALID_TOOL_ARGUMENTS", str(exc), (record,)
@@ -124,7 +133,7 @@ class AgentRunner:
             return self._failure(
                 "MODEL_PROTOCOL",
                 "EMPTY_MODEL_RESPONSE",
-                "provider returned neither text nor a tool call",
+                "model returned neither text nor a tool call",
             )
         return AgentTurnResult(
             "returned", text, "model_returned", usage=dict(response.usage)

@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
-logger = logging.getLogger(__name__)
-
+from hey_robot.app.runtime_components import (
+    RuntimeComponents,
+    build_local_runtime_components,
+)
 from hey_robot.app.sidecars import managed_robocasa_backend
 from hey_robot.cognition.autonomous_agent_service import AutonomousAgentService
 from hey_robot.cognition.perception.scene import build_scene_captioner
@@ -18,10 +20,11 @@ from hey_robot.config.validation import validate_deployment
 from hey_robot.gateway import GatewayService
 from hey_robot.human_follow import HumanFollowService
 from hey_robot.logging import HeyRobotLogger
-from hey_robot.robot_runtime import RobotService
-from hey_robot.robot_runtime.media import MediaResolver
-from hey_robot.skill_os.controller import SkillControllerService
-from hey_robot.skill_os.registry import registry_from_config
+from hey_robot.robot_media import MediaResolver
+from hey_robot.robot_transport import RobotService
+from hey_robot.skills import robot_action_specs_from_config
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -133,11 +136,12 @@ class DeploymentRunner:
     def _build_services(self) -> list[ManagedService]:
         services: list[ManagedService] = []
         robot = None
-        skill_catalog = registry_from_config(self.config).robot_skill_catalog()
+        runtime_components: RuntimeComponents | None = None
+        action_specs = robot_action_specs_from_config(self.config)
         if self.config.robots:
             robot = RobotService(
                 self.config,
-                skill_catalog=skill_catalog,
+                action_specs=action_specs,
                 scene_captioner_factory=lambda store: build_scene_captioner(
                     self.config,
                     self.config.default_agent_id(),
@@ -156,15 +160,35 @@ class DeploymentRunner:
                         "human-follow", human_follow.start, human_follow.stop
                     )
                 )
-        if any(spec.enabled for spec in self.config.policies.values()):
-            skills = SkillControllerService(self.config)
+        if robot is not None:
+            runtime_components = build_local_runtime_components(
+                self.config,
+                robot_service=robot,
+            )
             services.append(
-                ManagedService("skill-controller", skills.start, skills.stop)
+                ManagedService(
+                    "skills",
+                    runtime_components.skill_client.start,
+                    runtime_components.skill_client.close,
+                )
             )
         for agent_id, spec in self.config.agents.items():
             if not spec.enabled:
                 continue
-            agent = AutonomousAgentService(self.config, agent_id=agent_id)
+            agent = AutonomousAgentService(
+                self.config,
+                agent_id=agent_id,
+                skill_client=(
+                    runtime_components.skill_client
+                    if runtime_components is not None
+                    else None
+                ),
+                agent_skills=(
+                    runtime_components.agent_skills
+                    if runtime_components is not None
+                    else None
+                ),
+            )
             services.append(
                 ManagedService(f"agent:{agent_id}", agent.start, agent.stop)
             )

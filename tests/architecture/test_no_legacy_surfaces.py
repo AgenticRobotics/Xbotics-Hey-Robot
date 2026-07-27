@@ -32,7 +32,6 @@ SOURCE_ONLY_FORBIDDEN = (
 
 FORBIDDEN_PATH_PARTS = (
     Path("src/hey_robot/agents"),
-    Path("src/hey_robot/skills"),
     Path("src/hey_robot/robots"),
     Path("src/hey_robot/capability"),
     Path("src/hey_robot/tasks"),
@@ -53,6 +52,14 @@ FORBIDDEN_PATH_PARTS = (
     Path("src/hey_robot/motion/grasp_point.py"),
     Path("src/hey_robot/motion/table_plane.py"),
     Path("tests/test_grasp_algorithm_sim.py"),
+    Path("src/hey_robot/skills/clients.py"),
+    Path("src/hey_robot/cognition/runtime/harness_store.py"),
+    Path("src/hey_robot/skills/lifecycle.py"),
+    Path("src/hey_robot/skills/manipulation_adapter.py"),
+    Path("src/hey_robot/skills/navigation_adapter.py"),
+    Path("src/hey_robot/robot_runtime/identity.py"),
+    Path("src/hey_robot/robocasa_runtime"),
+    Path("scripts/robots/so101_tabletop"),
 )
 
 

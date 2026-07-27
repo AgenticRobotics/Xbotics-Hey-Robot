@@ -15,7 +15,6 @@ from hey_robot.foundation.clients import (
 from hey_robot.foundation.contract.v1 import model_service_pb2
 from hey_robot.foundation.transport.grpc.client import GrpcModelServiceClient
 from hey_robot.protocol import Envelope, SkillIntent
-from hey_robot.skill_os import load_skill_registry
 
 
 def _config() -> DeploymentConfig:
@@ -23,7 +22,7 @@ def _config() -> DeploymentConfig:
         {
             "model_services": {
                 "arm_vla": {
-                    "type": "mock_vla_policy",
+                    "type": "mock",
                     "enabled": True,
                     "robot_id": "xlerobot",
                     "provides": ["set_gripper"],
@@ -114,7 +113,7 @@ def test_capability_runtime_allows_global_service_when_robot_id_not_specified() 
     assert spec.robot_id == ""
 
 
-def test_capability_runtime_routes_vla_policy_to_grpc_client(
+def test_capability_runtime_routes_robot_policy_to_grpc_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -129,7 +128,7 @@ def test_capability_runtime_routes_vla_policy_to_grpc_client(
         {
             "model_services": {
                 "arm_vla": {
-                    "type": "vla_policy",
+                    "type": "robot_policy",
                     "enabled": True,
                     "robot_id": "xlerobot",
                     "target": "127.0.0.1:9090",
@@ -199,7 +198,6 @@ def test_mock_capability_client_records_execution_and_cancel() -> None:
     request = ServiceInvocationRequest(
         service_id="arm_vla",
         intent=intent,
-        contract=load_skill_registry().robot_skill_catalog().get("set_gripper"),
         timeout_sec=10.0,
     )
 
@@ -263,7 +261,7 @@ def test_grpc_capability_client_maps_health_execute_and_cancel(
         {
             "model_services": {
                 "arm_vla": {
-                    "type": "vla_policy",
+                    "type": "robot_policy",
                     "robot_id": "xlerobot",
                     "target": "127.0.0.1:9090",
                     "provides": ["set_gripper"],
@@ -289,7 +287,6 @@ def test_grpc_capability_client_maps_health_execute_and_cancel(
             ServiceInvocationRequest(
                 service_id="arm_vla",
                 intent=intent,
-                contract=load_skill_registry().robot_skill_catalog().get("set_gripper"),
                 timeout_sec=2.0,
                 arguments={"action": "open", "camera": "front"},
             )
@@ -338,7 +335,7 @@ def test_grpc_capability_client_health_reports_connection_errors(
         {
             "model_services": {
                 "arm_vla": {
-                    "type": "vla_policy",
+                    "type": "robot_policy",
                     "robot_id": "xlerobot",
                     "target": "127.0.0.1:9090",
                     "provides": ["set_gripper"],
@@ -385,7 +382,7 @@ def test_grpc_capability_client_execute_reports_rpc_errors(
         {
             "model_services": {
                 "arm_vla": {
-                    "type": "vla_policy",
+                    "type": "robot_policy",
                     "robot_id": "xlerobot",
                     "target": "127.0.0.1:9090",
                     "provides": ["set_gripper"],
@@ -409,7 +406,6 @@ def test_grpc_capability_client_execute_reports_rpc_errors(
             ServiceInvocationRequest(
                 service_id="arm_vla",
                 intent=intent,
-                contract=load_skill_registry().robot_skill_catalog().get("set_gripper"),
                 timeout_sec=2.0,
             )
         )
@@ -446,7 +442,7 @@ def test_grpc_capability_client_cancel_propagates_rpc_errors(
         {
             "model_services": {
                 "arm_vla": {
-                    "type": "vla_policy",
+                    "type": "robot_policy",
                     "robot_id": "xlerobot",
                     "target": "127.0.0.1:9090",
                     "provides": ["set_gripper"],

@@ -14,7 +14,6 @@ from hey_robot.foundation.transport.grpc.server import (
     ModelServiceState,
 )
 from hey_robot.protocol import Envelope, SkillIntent
-from hey_robot.skill_os import load_skill_registry
 
 
 def test_deployment_style_model_service_grpc_flow(tmp_path) -> None:
@@ -61,7 +60,7 @@ def test_deployment_style_model_service_grpc_flow(tmp_path) -> None:
                 },
                 "model_services": {
                     "arm_vla": {
-                        "type": "vla_policy",
+                        "type": "robot_policy",
                         "enabled": True,
                         "robot_id": "xlerobot",
                         "provides": ["set_gripper"],
@@ -103,9 +102,6 @@ def test_deployment_style_model_service_grpc_flow(tmp_path) -> None:
                 ServiceInvocationRequest(
                     service_id="arm_vla",
                     intent=intent,
-                    contract=load_skill_registry()
-                    .robot_skill_catalog()
-                    .get("set_gripper"),
                     timeout_sec=20.0,
                 )
             )
@@ -126,7 +122,7 @@ def test_foundation_model_service_flow_keeps_skill_surface() -> None:
             {
                 "model_services": {
                     "arm_vla": {
-                        "type": "vla_policy",
+                        "type": "robot_policy",
                         "enabled": True,
                         "robot_id": "xlerobot",
                         "provides": ["set_gripper"],

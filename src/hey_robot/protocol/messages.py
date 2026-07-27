@@ -105,6 +105,16 @@ class ConversationTurn:
     session_key: str
     interaction_id: str
     text: str
+    kind: Literal["prompt", "steer"] = "prompt"
+
+
+@dataclass(frozen=True)
+class AgentControl:
+    envelope: Envelope
+    session_key: str
+    interaction_id: str
+    action: Literal["pause", "resume", "cancel", "emergency_stop"]
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -112,6 +122,7 @@ class ConversationResult:
     envelope: Envelope
     interaction_id: str
     text: str
+    final: bool = True
 
 
 @dataclass(frozen=True)
@@ -123,16 +134,6 @@ class ToolOutcome:
     data: dict[str, Any] = field(default_factory=dict)
     operation_id: str | None = None
     retryable: bool = False
-
-
-@dataclass(frozen=True)
-class ShortOperationCommand:
-    """一项由 Agent 提出的受限操作请求，由 Skill OS 准入并执行。"""
-
-    envelope: Envelope
-    operation_id: str
-    proposal: ActionProposal
-    timeout_sec: float = 45.0
 
 
 @dataclass(frozen=True)
@@ -239,6 +240,8 @@ CriterionPredicate = Literal["equals", "at", "near", "inside", "held_by", "obser
 
 @dataclass(frozen=True)
 class EvidenceFact:
+    """Compatibility DTO for the legacy distributed Skill result protocol."""
+
     evidence_id: str
     task_id: str
     source_kind: Literal["robot_status", "skill_result"]
@@ -252,14 +255,6 @@ class EvidenceFact:
 
 
 @dataclass(frozen=True)
-class ActionProposal:
-    intent_kind: Literal["skill", "observation"]
-    skill_name: str
-    objective: str
-    arguments: dict[str, Any]
-
-
-@dataclass(frozen=True)
 class FailurePayload:
     stage: str
     code: str
@@ -270,6 +265,8 @@ class FailurePayload:
 
 @dataclass(frozen=True)
 class SkillResult:
+    """Compatibility DTO; native Skill execution uses hey_robot.skills.SkillResult."""
+
     envelope: Envelope
     skill_id: str
     name: str = ""
@@ -288,6 +285,8 @@ class SkillResult:
 
 @dataclass(frozen=True)
 class SkillControl:
+    """Compatibility DTO for clients migrating to AgentControl."""
+
     envelope: Envelope
     control_id: str
     action: Literal["interrupt", "emergency_stop"]
@@ -298,6 +297,8 @@ class SkillControl:
 
 @dataclass(frozen=True)
 class SkillControlResult:
+    """Compatibility DTO for the retired distributed Skill control path."""
+
     envelope: Envelope
     control_id: str
     action: Literal["interrupt", "emergency_stop"]
@@ -309,6 +310,8 @@ class SkillControlResult:
 
 @dataclass(frozen=True)
 class RobotExecutionGate:
+    """Compatibility snapshot for legacy external control-plane clients."""
+
     robot_id: str
     version: int
     state: Literal["ready", "stop_pending", "uncertain"]

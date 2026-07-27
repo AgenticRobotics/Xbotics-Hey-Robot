@@ -27,11 +27,11 @@ import httpx
 from evaluation.robocasa365.conditions import condition_for
 from hey_robot.config import DeploymentConfig
 from hey_robot.foundation.transport.grpc.client import GrpcModelServiceClient
-from hey_robot.robot_runtime.robocasa_remote.client import GrpcRoboCasaRuntimeClient
-from hey_robot.robot_runtime.robocasa_remote.contract import (
+from hey_robot.robocasa_backend.contract import (
     ALLOWED_TASKS,
     load_manifest,
 )
+from hey_robot.robot_backends.robocasa_remote.client import GrpcRoboCasaRuntimeClient
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -49,12 +49,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--manifest",
         type=Path,
-        default=Path("configs/evaluation/robocasa365.tasks.yaml"),
+        default=Path("evaluation/robocasa365/tasks.yaml"),
     )
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("configs/evaluation/robocasa365.agent.yaml"),
+        default=Path("configs/evaluation/robocasa365.yaml"),
         help="Canonical Hey Robot deployment configuration",
     )
     parser.add_argument("--agent-url", default="http://127.0.0.1:8080/turn")
@@ -81,10 +81,15 @@ async def run_trial(args: argparse.Namespace) -> dict[str, object]:
     model_candidates = [
         (service_id, spec)
         for service_id, spec in config.model_services.items()
-        if spec.enabled and spec.type == "robocasa_lerobot_policy"
+        if spec.enabled
+        and spec.type == "robot_policy"
+        and str(spec.settings.get("runtime") or "") == "lerobot"
+        and str(spec.settings.get("embodiment") or "") == "robocasa"
     ]
     if len(model_candidates) != 1:
-        raise ValueError("config must contain exactly one robocasa_lerobot_policy")
+        raise ValueError(
+            "config must contain exactly one RoboCasa LeRobot robot_policy service"
+        )
     model_service_id, model_spec = model_candidates[0]
     credentials = json.loads(args.credentials_file.read_text(encoding="utf-8"))
     runtime = GrpcRoboCasaRuntimeClient(
@@ -263,6 +268,16 @@ async def run_trial(args: argparse.Namespace) -> dict[str, object]:
         if agent_turn_task.done():
             await agent_turn_task
         truth = await runtime.read_truth()
+        if truth["done"] and truth["official_success"] and agent_task:
+            await _mark_environment_complete(
+                args.agent_url,
+                str(agent_task["task_id"]),
+                reason="RoboCasa official evaluator reported episode completion.",
+            )
+            tasks = await asyncio.to_thread(_read_agent_tasks, args.agent_url)
+            agent_task = _find_trial_task(
+                tasks, objective=agent_objective, started=started
+            )
         evaluator_events = _evaluator_events(truth)
         model_options = _option_records([runtime_summary], trial_id=trial_id)
         actions = [item for item in evaluator_events if item.get("kind") == "action"]
@@ -355,6 +370,24 @@ async def _send_agent_turn(
     # several planner / perception / option cycles before the response closes.
     async with httpx.AsyncClient(timeout=timeout_sec) as client:
         response = await client.post(url, json=payload)
+        response.raise_for_status()
+
+
+async def _mark_environment_complete(
+    agent_url: str, task_id: str, *, reason: str
+) -> None:
+    parsed = urlsplit(agent_url)
+    endpoint = urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            f"/api/tasks/{task_id}/environment-complete",
+            "",
+            "",
+        )
+    )
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.post(endpoint, json={"reason": reason})
         response.raise_for_status()
 
 
@@ -457,6 +490,9 @@ def _option_records(
 
 
 def _skill_belongs_to_trial(item: dict[str, object], trial_id: str) -> bool:
+    envelope = item.get("envelope", {})
+    if isinstance(envelope, dict) and envelope.get("chat_id") == trial_id:
+        return True
     timeline = item.get("timeline", [])
     if not isinstance(timeline, list):
         return False

@@ -1,20 +1,14 @@
-# Main mock development deployment for task runtime and channel integration.
 deployment:
   id: mock-dev
   bus:
-    # 仅限单进程开发，不能连接独立运行的服务。
     type: in_memory
     url: memory://mock-dev
-
     options:
       robot_publish_hz: 10.0
-      robot_status_log_every_frames: 5
-
+      robot_status_log_every_frames: 30
 agent_runtime:
   enabled: true
   robot_id: mock0
-  entity_catalog: [robot:mock0, scene]
-
 logging:
   level: INFO
   theme: dark
@@ -22,7 +16,6 @@ logging:
   file_path: logs/mock-dev/app.log
   json_file_path: logs/mock-dev/app.jsonl
   throttle_sec: 0.0
-
 resources:
   runtime_dir: runtime/mock.dev
   media:
@@ -33,49 +26,25 @@ resources:
     root: runtime/mock.dev/episodes
   events:
     retain: 2000
-
 skills:
   modules:
-    - hey_robot.skill_os.builtins
+  - hey_robot.skills.builtins
   mode: bringup
-  enabled:
-    - inspect_scene
-    - look_around
-    - detect_marker
-    - human_follow
-    - stop_motion
-
-notifications:
-  defaults:
-    channels: [web]
-  channels:
-    web: {}
-    voice:
-      chat_id: mock-voice
-      sender_id: voice-user
-    feishu:
-      chat_id: ""
-  kinds:
-    task_watchdog:
-      severity: critical
-      channels: [web]
-    proactive_message:
-      severity: info
-      channels: [web]
-
+  tools:
+  - inspect_scene
+  execution_mode: local
 identity:
   enabled: true
   unified_user_episodes: true
   bindings:
-    "cli:sender:local-user": owner
-    "web:sender:eval-user": owner
-
+    cli:sender:local-user: owner
+    web:sender:eval-user: owner
 channels:
   cli:
     type: cli
     enabled: true
     account_id: mock-dev
-    prompt: "mock-dev> "
+    prompt: 'mock-dev> '
     sender_id: local-user
     chat_id: mock-dev-local
   web:
@@ -110,9 +79,8 @@ channels:
     reply_to_message: true
     domain: feishu
     allow_from:
-      - "*"
+    - '*'
     media_root: runtime/mock.dev/media/feishu
-
 robots:
   mock0:
     type: mock
@@ -145,15 +113,12 @@ robots:
     visible_after_scans:
       cup: 1
       block: 1
-
 model_services: {}
-
 policies:
   embodied_skills:
     enabled: true
     robot_id: mock0
     freq_hz: 10.0
-
 agents:
   main:
     enabled: true
@@ -161,14 +126,11 @@ agents:
     policy_id: embodied_skills
     settings:
       mode: autonomous
-      providers:
+      models:
         planner:
-          type: deepseek
           model_env: DEEPSEEK_MODEL
           api_key_env: DEEPSEEK_API_KEY
           base_url_env: DEEPSEEK_BASE_URL
           temperature: 0.0
           max_tokens: 1024
         media_root: runtime/mock.dev/media
-
-

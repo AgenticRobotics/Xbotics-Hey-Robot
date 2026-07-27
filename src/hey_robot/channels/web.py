@@ -27,6 +27,7 @@ EpisodeTaskPayload = dict[str, Any] | None
 EpisodeTaskProvider = Callable[[str], EpisodeTaskPayload | Any]
 RuntimeSummaryPayload = dict[str, Any]
 RuntimeSummaryProvider = Callable[[int], RuntimeSummaryPayload | Any]
+EnvironmentCompletionProvider = Callable[[str, str], dict[str, Any] | Any]
 
 
 class WebChannel:
@@ -43,6 +44,7 @@ class WebChannel:
         tasks_list_provider: TasksListProvider | None = None,
         episode_task_provider: EpisodeTaskProvider | None = None,
         runtime_summary_provider: RuntimeSummaryProvider | None = None,
+        environment_completion_provider: EnvironmentCompletionProvider | None = None,
     ) -> None:
         self.context = context
         self.name = context.name
@@ -53,8 +55,10 @@ class WebChannel:
         self.tasks_list_provider = tasks_list_provider
         self.episode_task_provider = episode_task_provider
         self.runtime_summary_provider = runtime_summary_provider
+        self.environment_completion_provider = environment_completion_provider
         self.host = str(context.spec.settings.get("host", "127.0.0.1"))
         self.port = int(context.spec.settings.get("port", 8080))
+        self.serve_frontend = bool(context.spec.settings.get("serve_frontend", True))
         self._server: Any | None = None
         self._server_task: asyncio.Task | None = None
         self._websockets: set[Any] = set()
@@ -74,7 +78,12 @@ class WebChannel:
             ) from exc
 
         app = FastAPI(title="Hey Robot Gateway")
-        app.mount("/static", StaticFiles(directory=str(_static_root())), name="static")
+        if self.serve_frontend:
+            app.mount(
+                "/static",
+                StaticFiles(directory=str(_static_root())),
+                name="static",
+            )
 
         @app.middleware("http")
         async def _static_cache(request, call_next):
@@ -83,42 +92,33 @@ class WebChannel:
                 response.headers["Cache-Control"] = "public, max-age=3600"
             return response
 
-        @app.get("/", response_class=RedirectResponse)
-        async def dashboard() -> RedirectResponse:
-            return RedirectResponse(url="/chat")
+        if self.serve_frontend:
 
-        @app.get("/chat", response_class=HTMLResponse)
-        async def chat_page() -> HTMLResponse:
-            return self._chat_html_response()  # type: ignore[no-any-return]
+            @app.get("/", response_class=RedirectResponse)
+            async def dashboard() -> RedirectResponse:
+                return RedirectResponse(url="/chat")
 
-        # 旧路由：重定向到新聊天入口
-        @app.get("/console", response_class=RedirectResponse)
-        async def console_page() -> RedirectResponse:
-            return RedirectResponse(url="/chat")
+            @app.get("/chat", response_class=HTMLResponse)
+            async def chat_page() -> HTMLResponse:
+                return self._chat_html_response()  # type: ignore[no-any-return]
 
-        @app.get("/control", response_class=RedirectResponse)
-        async def control_page() -> RedirectResponse:
-            return RedirectResponse(url="/chat")
+            @app.get("/admin", response_class=HTMLResponse)
+            async def admin_page() -> HTMLResponse:
+                return self._views_html_response("admin", "index.html")  # type: ignore[no-any-return]
 
-        @app.get("/account", response_class=RedirectResponse)
-        async def account_page() -> RedirectResponse:
-            return RedirectResponse(url="/chat")
+            @app.get("/tasks", response_class=HTMLResponse)
+            async def tasks_list_page() -> HTMLResponse:
+                return self._views_html_response("tasks", "index.html")  # type: ignore[no-any-return]
 
-        @app.get("/admin", response_class=HTMLResponse)
-        async def admin_page() -> HTMLResponse:
-            return self._views_html_response("admin", "index.html")  # type: ignore[no-any-return]
+            @app.get("/tasks/{episode_id}", response_class=HTMLResponse)
+            async def tasks_detail_page(
+                episode_id: str,  # noqa: ARG001
+            ) -> HTMLResponse:
+                return self._views_html_response("tasks", "detail.html")  # type: ignore[no-any-return]
 
-        @app.get("/tasks", response_class=HTMLResponse)
-        async def tasks_list_page() -> HTMLResponse:
-            return self._views_html_response("tasks", "index.html")  # type: ignore[no-any-return]
-
-        @app.get("/tasks/{episode_id}", response_class=HTMLResponse)
-        async def tasks_detail_page(episode_id: str) -> HTMLResponse:  # noqa: ARG001
-            return self._views_html_response("tasks", "detail.html")  # type: ignore[no-any-return]
-
-        @app.get("/cockpit", response_class=RedirectResponse)
-        async def cockpit_page() -> RedirectResponse:
-            return RedirectResponse(url="/tasks")
+            @app.get("/cockpit", response_class=RedirectResponse)
+            async def cockpit_page() -> RedirectResponse:
+                return RedirectResponse(url="/tasks")
 
         @app.get("/health")
         async def health() -> dict[str, str]:
@@ -210,6 +210,22 @@ class WebChannel:
             if inspect.isawaitable(result):
                 return cast(RuntimeSummaryPayload, await result)
             return cast(RuntimeSummaryPayload, result)
+
+        @app.post("/api/tasks/{task_id}/environment-complete")
+        async def environment_complete(
+            task_id: str, payload: dict[str, Any] | None = None
+        ) -> dict[str, Any]:
+            if self.environment_completion_provider is None:
+                raise HTTPException(
+                    status_code=404, detail="environment completion is disabled"
+                )
+            reason = str(
+                (payload or {}).get("reason") or "environment reported completion"
+            )
+            result = self.environment_completion_provider(task_id, reason)
+            if inspect.isawaitable(result):
+                result = await result
+            return cast(dict[str, Any], result)
 
         @app.websocket("/ws")
         async def ws(socket: WebSocket) -> None:
@@ -340,8 +356,9 @@ class WebChannel:
 
     async def send(self, reply: AgentReply) -> None:
         payload = to_payload(reply)
-        self._replies.append(payload)
-        self._replies = self._replies[-500:]
+        if reply.final:
+            self._replies.append(payload)
+            self._replies = self._replies[-500:]
         stale = []
         for sock in self._websockets:
             try:
